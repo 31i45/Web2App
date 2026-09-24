@@ -2,6 +2,8 @@
 
 自繁殖单文件跨平台 Web→桌面应用打包器。输入网页 URL，生成单文件桌面应用；产物本身也是母版，可再次打包新应用（自繁殖闭环）。
 
+受开源项目https://github.com/tw93/Pake和小暖科技的SiteNative项目启发。
+
 ## 快速开始
 
 ```powershell
