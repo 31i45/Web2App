@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '04972cbd-7100-4631-8215-32adadbe4e08'
-  PropagateID: '04972cbd-7100-4631-8215-32adadbe4e08'
-  ReservedCode1: 'd559be98-bb2d-4468-b05a-6c8ccf960adf'
-  ReservedCode2: 'd559be98-bb2d-4468-b05a-6c8ccf960adf'
----
-
 # Web2App
 
 自繁殖单文件跨平台 Web→桌面应用打包器。输入网页 URL，生成单文件桌面应用；产物本身也是母版，可再次打包新应用（自繁殖闭环）。
@@ -22,6 +11,7 @@ AIGC:
 # 运行母版
 .\dist\Web2App.exe
 ```
+<img width="1654" height="1172" alt="image" src="https://github.com/user-attachments/assets/054b657d-88ec-458b-b90b-2335af94ed10" />
 
 母版界面只有两元素：**网页 URL 输入框、打包按钮**（回车也可提交）。点击「打包」，产物生成在母版所在目录（文件名 = URL host，如 `example.com.exe`）。
 
@@ -74,5 +64,3 @@ cargo build --release       # Release（opt-level=z, lto, strip）
 ```
 
 依赖：`wry 0.57`（devtools only）、`tao 0.37`、`dunce 1`。JSON 手写，零 serde。
-
-> AI生成
