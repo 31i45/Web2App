@@ -1,0 +1,18 @@
+[package]
+name = "web2app"
+version = "1.0.0"
+edition = "2021"
+description = "Self-reproducing single-file cross-platform web-to-app packager"
+license = "MIT"
+
+[dependencies]
+wry = { version = "0.57", default-features = false, features = ["devtools"] }
+tao = "0.37"
+dunce = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
