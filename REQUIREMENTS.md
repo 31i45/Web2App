@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '035df0f2-083f-4258-8d08-b92b5a3ab3d7'
-  PropagateID: '035df0f2-083f-4258-8d08-b92b5a3ab3d7'
-  ReservedCode1: 'fe790ba0-3bc7-42ea-8b15-9e591776557b'
-  ReservedCode2: 'fe790ba0-3bc7-42ea-8b15-9e591776557b'
----
-
 # 「自繁殖单文件跨平台 Web2App」终极版需求文档（AI 一次性开发版）
 
 ## 核心特点
@@ -66,4 +55,3 @@ AIGC:
 
 - 参考开源项目：<https://github.com/31i45/Pake/>
 
-> AI生成
