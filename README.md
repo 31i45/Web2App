@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: 'd69f22df-1aa4-43a1-80ac-ef072e21cba8'
-  PropagateID: 'd69f22df-1aa4-43a1-80ac-ef072e21cba8'
-  ReservedCode1: '5acdb324-8197-4b10-b0d5-09bd33c96330'
-  ReservedCode2: '5acdb324-8197-4b10-b0d5-09bd33c96330'
----
-
 # Web2App
 
 自繁殖单文件跨平台 Web→桌面应用打包器。输入网页 URL，自动抓取 favicon 作为图标，生成单文件桌面应用；产物本身也是母版，可再次打包新应用（自繁殖闭环）。
@@ -86,4 +75,3 @@ cargo build --release       # Release（opt-level=z, lto, strip）
 
 依赖：`wry 0.57`（devtools only）、`tao 0.37`、`dunce 1`、`png 0.18`、`ureq 2`（favicon 获取）。JSON 手写，零 serde。
 
-> AI生成
