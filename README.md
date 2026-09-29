@@ -1,13 +1,13 @@
 # Web2App
 
-自繁殖单文件跨平台 Web→桌面应用打包器。输入网页 URL，自动抓取 favicon 作为图标，生成单文件桌面应用；产物本身也是母版，可再次打包新应用（自繁殖闭环）。
+自繁殖单文件跨平台 Web→桌面应用打包器。输入网页 URL（可选自定义图标），生成单文件桌面应用；产物本身也是母版，可再次打包新应用（自繁殖闭环）。
 
 受开源项目https://github.com/tw93/Pake和小暖科技的SiteNative项目启发。
 
 ## 快速开始
 
 ```powershell
-# 一键构建（测试 + Release + 母版装配 + logo 自举）
+# 一键构建（测试 + Release + 母版装配）
 .\build.ps1
 
 # 运行母版
@@ -15,7 +15,7 @@
 ```
 <img width="1654" height="1172" alt="image" src="https://github.com/user-attachments/assets/054b657d-88ec-458b-b90b-2335af94ed10" />
 
-母版界面只有两元素：**网页 URL 输入框、打包按钮**（回车也可提交）。点击「打包」，自动获取网页 favicon 注入产物图标，产物生成在母版所在目录（文件名 = URL host，如 `example.com.exe`）。
+母版界面三元素：**网页 URL 输入框、图标选择（可选）、打包按钮**（回车也可提交）。点击「打包」，产物生成在母版所在目录（文件名 = URL host，如 `example.com.exe`）。选图走浏览器原生 `input[type=file]`+`FileReader`，图片字节经 IPC 传给原生，不依赖绝对路径。
 
 ## 使用产物
 
@@ -26,7 +26,7 @@
 
 | 指标 | 目标 | 实测 |
 |---|---|---|
-| 单文件体积 | < 10 MB | 1.75 MB |
+| 单文件体积 | < 10 MB | 644 KB |
 | 冷启动 | < 2 s | 秒级 |
 | 关闭残留 | 无 | 进程/WebView2 子进程全部退出 |
 | 运行副作用 | 无 | 无后台控制台；exe 目录零落盘 |
@@ -35,16 +35,18 @@
 
 ```
 src/
-├── main.rs      # 唯一入口：--set-icon 工具模式 / --master / 尾部配置分发
-├── webview.rs   # 渲染层：wry(WebView2/WKWebView/WebKitGTK) + tao 窗口（深色标题栏）
-├── ui.rs        # 母版表单（内嵌 HTML，两元素）
-├── builder.rs   # 打包引擎：复制自身 → 剥离旧图标 → 注入 favicon → 追加尾部
+├── main.rs      # 唯一入口：--master / 尾部配置分发
+├── webview.rs   # 渲染层：wry(WebView2/WKWebView/WebKitGTK) + tao 窗口（深色标题栏+窗口图标）
+├── ui.rs        # 母版表单（内嵌 HTML，三元素；选图用 FileReader 字节传输）
+├── builder.rs   # 打包引擎：复制自身 → 追加尾部配置（含可选图标）
 ├── tail.rs      # 自繁殖协议：<payload JSON> <MAGIC:16B> <len:u64 LE>
-├── icon.rs      # 图标域：favicon 获取/解析/组装 + 跨平台注入统一入口
-└── pe.rs        # PE 资源注入（仅 Windows 编译，对上层零平台暴露）
+└── icon.rs      # 图标域：PNG 解码与窗口图标转换（tao Icon，跨平台统一）
+
+build.rs         # 母版 w2a 图标经 .rc 编译进 exe（winres，仅 Windows）
+assets/w2a.ico   # 母版图标源（深蓝渐变 + 白色 w2a）
 ```
 
-跨平台策略：同一功能优先同一实现（环境探测链），无法避免的平台差异收敛到 `icon.rs` 的 `embed_icon`/`strip_icon` 单函数适配层——分 case 聚合于一屏，上层调用零感知。
+跨平台策略：同一功能优先同一实现——图标显示拆为两条通道，各自采用最可靠的机制，三平台一套代码，无手写 PE 手术。
 
 ### 自繁殖原理
 
@@ -56,11 +58,11 @@ src/
 - **零目录污染**：WebView 用户数据统一放系统应用数据区（Windows `%LOCALAPPDATA%`，macOS `~/Library/Application Support`，Linux `~/.local/share`），exe 旁边不产生任何文件夹。
 - **深色标题栏**：窗口主题固定 `Theme::Dark`，与 UI 深色主题一致。
 
-### 图标机制
+### 图标机制（两条通道，各自最可靠的机制）
 
-- **产物图标 = 目标网页 favicon**：打包时请求 `https://<host>/favicon.ico`（10s 超时），支持 ICO 容器（PNG/BMP-DIB 条目）与裸 PNG，转换后注入 PE 资源节。获取失败不阻塞打包，产物保留母版图标。
-- **母版图标 = w2a 艺术字**：`assets/logo.png`（深蓝渐变 + 白色 w2a），构建脚本经 `--set-icon` 工具模式自举注入。
-- **替换语义**：产物组装时物理剥离母版图标节再注入 favicon（字节级回收，自繁殖多代不膨胀）。
+- **文件图标**（Explorer/任务栏）：母版 w2a 图标经 `.rc` 资源脚本由链接器编译进 exe（`build.rs` + `assets/w2a.ico`）；产物字节级继承母版，零注入代码。
+- **窗口图标**（标题栏/运行时任务栏）：用户选图以 base64 内嵌尾部配置，产物启动时经 tao `with_window_icon` 设置（三平台同一 API）；未选图自动回落 exe 资源图标（w2a）。
+- **机制边界**：Explorer 文件列表中产物恒显示 w2a 图标（不随选图变化）；运行后标题栏与任务栏显示用户图标。
 
 ## 待解决问题
 
@@ -69,9 +71,8 @@ src/
 ## 开发
 
 ```powershell
-cargo test --bin web2app    # 42 个单元测试
+cargo test --bin web2app    # 35 个单元测试
 cargo build --release       # Release（opt-level=z, lto, strip）
 ```
 
-依赖：`wry 0.57`（devtools only）、`tao 0.37`、`dunce 1`、`png 0.18`、`ureq 2`（favicon 获取）。JSON 手写，零 serde。
-
+依赖：`wry 0.57`（devtools only）、`tao 0.37`、`dunce 1`、`png 0.18`；构建期 `winres`（仅 Windows，不进运行时）。JSON/base64 手写，零 serde。

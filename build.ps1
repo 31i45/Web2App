@@ -1,10 +1,9 @@
 # Web2App 一键构建脚本
 # 用法：
-#   .\build.ps1              # 完整构建：测试 + Release 编译 + 母版装配（含 logo 自举）
+#   .\build.ps1              # 完整构建：测试 + Release 编译 + 母版装配
 #   .\build.ps1 -SkipTests   # 跳过单元测试
 param(
     [switch]$SkipTests,
-    [string]$Logo = "assets\logo.png",
     [string]$OutDir = "dist"
 )
 
@@ -22,36 +21,20 @@ if (-not $SkipTests) {
     Write-Host "[1/3] skip tests" -ForegroundColor DarkGray
 }
 
-# 2) Release 编译（GUI 子系统，双击无控制台）
+# 2) Release 编译（GUI 子系统 + w2a 图标经 .rc 编译进 exe）
 Write-Host "[2/3] cargo build --release" -ForegroundColor Cyan
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
-# 3) 母版装配 + logo 自举注入
+# 3) 母版装配
 Write-Host "[3/3] assemble master" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $master = Join-Path $OutDir "Web2App.exe"
 Copy-Item "target\release\web2app.exe" $master -Force
 
-if (Test-Path $Logo) {
-    # 注入到发布副本（Windows 进程运行中无法写自身文件锁，脚本总是传副本路径）
-    & "target\release\web2app.exe" --set-icon $Logo $master
-    if ($LASTEXITCODE -ne 0) {
-        # 副本被占用兜底：换临时文件注入后回拷
-        $tmp = "$master.icon-tmp"
-        Copy-Item $master $tmp -Force
-        & "target\release\web2app.exe" --set-icon $Logo $tmp
-        if ($LASTEXITCODE -ne 0) { Remove-Item $tmp -Force; throw "logo injection failed" }
-        Move-Item $tmp $master -Force
-    }
-    Write-Host "master logo injected: $Logo"
-} else {
-    Write-Host "logo not found ($Logo), skip icon injection" -ForegroundColor Yellow
-}
-
 $size = (Get-Item $master).Length
 Write-Host ("master: {0} ({1:N0} KB)" -f $master, ($size / 1KB))
 if ($size -gt 10MB) { Write-Host "WARN: exceeds 10MB limit!" -ForegroundColor Red }
 Write-Host ""
-Write-Host "usage: run Web2App.exe -> input URL -> click pack (favicon auto-fetched)" -ForegroundColor Green
+Write-Host "usage: run Web2App.exe -> input URL (+ optional icon) -> click pack" -ForegroundColor Green
 Write-Host "       product --master -> reopen packer (self-reproduction)" -ForegroundColor Green

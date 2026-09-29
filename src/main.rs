@@ -1,10 +1,9 @@
 //! main.rs — 唯一入口。
 //!
 //! 分发逻辑（一套代码三平台）：
-//! 1. `--set-icon <png> [target]`：工具模式，构建脚本自举母版 logo。
-//! 2. `--master`：强制母版模式（产物的自繁殖入口）。
-//! 3. 尾部有配置 → 打开目标网页（普通 Web2App 应用）。
-//! 4. 尾部无配置 → 母版模式，显示打包表单。
+//! 1. `--master`：强制母版模式（产物的自繁殖入口）。
+//! 2. 尾部有配置 → 打开目标网页（普通 Web2App 应用）。
+//! 3. 尾部无配置 → 母版模式，显示打包表单。
 //!
 //! Release 构建为 Windows GUI 子系统：双击运行不出现后台控制台。
 
@@ -13,7 +12,6 @@
 
 mod builder;
 mod icon;
-mod pe;
 mod tail;
 mod ui;
 mod webview;
@@ -22,39 +20,21 @@ use tao::event_loop::ControlFlow;
 use tao::window::Theme;
 use wry::{WebContext, WebView};
 
-/// 事件循环自定义事件：打包请求。
+/// 事件循环自定义事件：打包请求（图标字节可选，None = 继承母版 w2a）。
 #[derive(Debug, Clone)]
 enum FormEvent {
-  Pack { url: String },
+  Pack { url: String, icon: Option<Vec<u8>> },
 }
 
 fn main() {
   let args: Vec<String> = std::env::args().collect();
 
-  // 1) 工具模式：`--set-icon <png> [target.exe]`，构建脚本自举母版 logo。
-  //    Windows 进程无法写自身（文件锁），故总是对「发布副本」注入。
-  if args.len() >= 3 && args.len() <= 4 && args[1] == "--set-icon" {
-    let png = std::path::PathBuf::from(&args[2]);
-    let target = args
-      .get(3)
-      .map(std::path::PathBuf::from)
-      .unwrap_or_else(|| tail::current_exe().unwrap_or_default());
-    match builder::tool_set_icon(&png, &target) {
-      Ok(_) => println!("icon injected"),
-      Err(e) => {
-        eprintln!("set-icon failed: {e}");
-        std::process::exit(1);
-      }
-    }
-    return;
-  }
-
-  // 2) `--master` 强制母版模式：产物 exe 由此再次打包新应用（自繁殖入口）
+  // 1) `--master` 强制母版模式：产物 exe 由此再次打包新应用（自繁殖入口）
   if args.len() == 2 && args[1] == "--master" {
     return run_master();
   }
 
-  // 3) 读取尾部配置 → 决定母版/应用模式
+  // 2) 读取尾部配置 → 决定母版/应用模式
   match tail::read_tail() {
     Ok(Some(c)) => webview::open_webview(c),
     Ok(None) => run_master(),
@@ -72,17 +52,22 @@ fn run_master() {
   // IPC 事件经 EventLoopProxy 投递到事件循环
   let proxy = event_loop.create_proxy();
 
-  let window = webview::build_window(&event_loop, "Web2App 打包器", Theme::Dark);
+  // 母版窗口不设用户图标：自动回落 exe 资源图标（w2a，由 build.rs 编译进 exe）
+  let window = webview::build_window(&event_loop, "Web2App 打包器", Theme::Dark, None);
   // 母版表单 WebView：固定数据目录（不打扰任何 exe 目录）
   let mut context = WebContext::new(Some(webview::webview_data_dir("web2app-master")));
 
   let webview = wry::WebViewBuilder::new_with_web_context(&mut context)
     .with_html(ui::form_html())
     .with_ipc_handler(move |req| {
-      // JS 端约定：`pack:<url>`
+      // JS 端约定：`pack:<url>\n<base64 图标>`（图标可选）
       let body = req.into_body();
-      if let Some(url) = body.strip_prefix("pack:") {
-        let _ = proxy.send_event(FormEvent::Pack { url: url.to_string() });
+      if let Some(rest) = body.strip_prefix("pack:") {
+        let mut lines = rest.splitn(2, '\n');
+        let url = lines.next().unwrap_or("").to_string();
+        let b64 = lines.next().unwrap_or("");
+        let icon = if b64.is_empty() { None } else { tail::base64_decode(b64) };
+        let _ = proxy.send_event(FormEvent::Pack { url, icon });
       }
     })
     .build(&window)
@@ -96,7 +81,7 @@ fn run_master() {
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;
     match event {
-      tao::event::Event::UserEvent(FormEvent::Pack { url }) => master.on_pack(url),
+      tao::event::Event::UserEvent(FormEvent::Pack { url, icon }) => master.on_pack(url, icon),
       tao::event::Event::WindowEvent {
         event: tao::event::WindowEvent::CloseRequested,
         ..
@@ -117,20 +102,25 @@ struct Master {
 }
 
 impl Master {
-  /// 执行打包并回报状态。阻塞 UI 数秒（favicon 拉取 ≤10s + 复制秒级完成）。
-  fn on_pack(&mut self, url: String) {
+  /// 执行打包并回报状态。阻塞 UI 数秒（纯本地复制，无网络等待）。
+  fn on_pack(&mut self, url: String, icon: Option<Vec<u8>>) {
     let filename = ui::product_filename(&url);
     let out_dir = dirs_of_current_exe();
     let out = out_dir.join(&filename);
 
-    // favicon 获取：可选增强，任何失败不阻塞打包（产物照常生成，仅无图标）
-    let favicon = icon::fetch_favicon(&url);
-    let icon_note = match &favicon {
-      Some(v) => format!("，图标 {} 种尺寸", v.len()),
-      None => String::new(),
+    // 图标可选：None / 解码失败 → 产物继承母版 w2a 图标，不阻塞打包
+    let icon_note = match icon.as_deref().and_then(icon::decode_png) {
+      Some((w, h, _)) => format!("，图标 {w}x{h}"),
+      None => {
+        if icon.is_some() {
+          "，图标解析失败用默认".to_string()
+        } else {
+          String::new()
+        }
+      }
     };
 
-    match builder::pack(&out, &url, favicon) {
+    match builder::pack(&out, &url, icon) {
       Ok(result) => {
         let kb = result.size as f64 / 1024.0;
         self.set_status(

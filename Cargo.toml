@@ -10,7 +10,9 @@ wry = { version = "0.57", default-features = false, features = ["devtools"] }
 tao = "0.37"
 dunce = "1"
 png = "0.18"
-ureq = "2"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [profile.release]
 opt-level = "z"

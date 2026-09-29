@@ -1,6 +1,6 @@
 //! tail.rs — 自繁殖协议：尾部追加式单文件配置。
 //!
-//! 「一个程序就是一份配置」：URL 追加在可执行文件尾部，
+//! 「一个程序就是一份配置」：URL 与可选图标 PNG 追加在可执行文件尾部，
 //! 母版=无尾部配置的裸程序，产物=母版+尾部配置。产物本身就是新的母版，
 //! 可再次追加新配置 → 生成即母版，自繁殖闭环。
 //!
@@ -22,30 +22,44 @@ pub struct AppConfig {
   pub url: String,
   /// 窗口标题（默认取 URL host）。
   pub title: String,
+  /// 用户图标 PNG 原始字节（可选；None = 继承母版 w2a 文件图标）。
+  pub icon_png: Option<Vec<u8>>,
 }
 
 impl AppConfig {
-  pub fn new(url: String, title: String) -> Self {
-    Self { url, title }
+  pub fn new(url: String, title: String, icon_png: Option<Vec<u8>>) -> Self {
+    Self { url, title, icon_png }
   }
 
   /// 序列化为尾部 payload JSON（手写转义，零 serde 依赖，符合极简红线）。
+  /// 图标存在时以 base64 内嵌（IPC 传输与存储共用同一编码）。
   pub fn to_json(&self) -> String {
-    format!(
-      "{{\"url\":{},\"title\":{}}}",
-      json_escape(&self.url),
-      json_escape(&self.title)
-    )
+    match &self.icon_png {
+      Some(png) => format!(
+        "{{\"url\":{},\"title\":{},\"icon\":\"{}\"}}",
+        json_escape(&self.url),
+        json_escape(&self.title),
+        base64_encode(png)
+      ),
+      None => format!(
+        "{{\"url\":{},\"title\":{}}}",
+        json_escape(&self.url),
+        json_escape(&self.title)
+      ),
+    }
   }
 
   /// 从尾部 payload JSON 解析。
   ///
-  /// 隐藏契约：字段按 `url → title` 顺序扫描（`to_json` 固定此序，
+  /// 隐藏契约：字段按 `url → title → icon` 顺序扫描（`to_json` 固定此序，
   /// 协议闭环内自产自销故安全；若字段顺序变更需同步改两处）。
+  /// `icon` 字段可缺失（向后兼容旧产物）→ None。
   pub fn from_json(json: &str) -> Option<Self> {
     let (url, rest) = extract_string_field(json, "url")?;
-    let (title, _) = extract_string_field(&rest, "title")?;
-    Some(Self { url, title })
+    let (title, rest) = extract_string_field(&rest, "title")?;
+    let icon_png = extract_string_field(&rest, "icon")
+      .and_then(|(b64, _)| base64_decode(&b64));
+    Some(Self { url, title, icon_png })
   }
 }
 
@@ -208,12 +222,60 @@ fn unescape(s: &str) -> String {
   out
 }
 
+// ---------- base64（图标字节与 JSON 的互转，纯手写零依赖） ----------
+
+/// 标准 base64 编码（带 padding）。
+pub fn base64_encode(data: &[u8]) -> String {
+  const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+  for chunk in data.chunks(3) {
+    let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+    let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+    out.push(TABLE[(n >> 18) as usize & 63] as char);
+    out.push(TABLE[(n >> 12) as usize & 63] as char);
+    out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+    out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+  }
+  out
+}
+
+/// 标准 base64 解码（忽略空白，支持 padding）。非法输入返回 None。
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+  fn val(c: u8) -> Option<u32> {
+    match c {
+      b'A'..=b'Z' => Some(u32::from(c - b'A')),
+      b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+      b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+      b'+' => Some(62),
+      b'/' => Some(63),
+      _ => None,
+    }
+  }
+  let s: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+  let s: Vec<u8> = s.iter().copied().take_while(|b| *b != b'=').collect();
+  if s.len() % 4 == 1 {
+    return None;
+  }
+  let mut out = Vec::with_capacity(s.len() * 3 / 4);
+  for chunk in s.chunks(4) {
+    let mut n: u32 = 0;
+    for (i, c) in chunk.iter().enumerate() {
+      n |= val(*c)? << (18 - 6 * i);
+    }
+    // 4 字符组→3字节；2字符→1字节；3字符→2字节
+    let produced = chunk.len().saturating_sub(1);
+    let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+    out.extend_from_slice(&bytes[..produced]);
+  }
+  Some(out)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
 
   fn sample() -> AppConfig {
-    AppConfig::new("https://example.com/app".into(), "My App".into())
+    AppConfig::new("https://example.com/app".into(), "My App".into(), None)
   }
 
   #[test]
@@ -224,8 +286,56 @@ mod tests {
   }
 
   #[test]
+  fn json_roundtrip_with_icon() {
+    let c = AppConfig::new(
+      "https://example.com".into(),
+      "example.com".into(),
+      Some(vec![1, 2, 3, 255, 0, 128, 64]),
+    );
+    let parsed = AppConfig::from_json(&c.to_json()).unwrap();
+    assert_eq!(parsed, c);
+    // payload 确实含 icon 字段
+    assert!(c.to_json().contains("\"icon\":"));
+  }
+
+  #[test]
+  fn json_missing_icon_field_backcompatible() {
+    // 旧产物（两字段）→ icon 为 None
+    let json = r#"{"url":"https://x.com","title":"T"}"#;
+    let c = AppConfig::from_json(json).unwrap();
+    assert_eq!(c.url, "https://x.com");
+    assert_eq!(c.title, "T");
+    assert!(c.icon_png.is_none());
+  }
+
+  #[test]
+  fn base64_known_vectors() {
+    assert_eq!(base64_encode(b"Man"), "TWFu");
+    assert_eq!(base64_encode(b"Ma"), "TWE=");
+    assert_eq!(base64_encode(b"M"), "TQ==");
+    assert_eq!(base64_encode(b""), "");
+    assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
+    assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
+    assert_eq!(base64_decode("TQ==").unwrap(), b"M");
+    assert_eq!(base64_decode("").unwrap(), b"");
+    // 忽略空白
+    assert_eq!(base64_decode("TW\nFu").unwrap(), b"Man");
+    assert!(base64_decode("A").is_none());
+    assert!(base64_decode("!!!").is_none());
+  }
+
+  #[test]
+  fn base64_roundtrip_random_lengths() {
+    for len in 0..64usize {
+      let data: Vec<u8> = (0..len as u8).map(|i| i.wrapping_mul(37).wrapping_add(11)).collect();
+      let enc = base64_encode(&data);
+      assert_eq!(base64_decode(&enc).unwrap(), data, "len={len}");
+    }
+  }
+
+  #[test]
   fn json_escapes_special_chars() {
-    let c = AppConfig::new("https://a.com/?q=\"x\"\\n".into(), "标\"题\\".into());
+    let c = AppConfig::new("https://a.com/?q=\"x\"\\n".into(), "标\"题\\".into(), None);
     let parsed = AppConfig::from_json(&c.to_json()).unwrap();
     assert_eq!(parsed.url, "https://a.com/?q=\"x\"\\n");
     assert_eq!(parsed.title, "标\"题\\");
@@ -255,7 +365,7 @@ mod tests {
   #[test]
   fn extract_tail_ignores_magic_in_payload() {
     // 魔数出现在正文/负载中不应干扰解析（尾部倒数定位免疫）
-    let c = AppConfig::new("https://x.io".into(), "T".into());
+    let c = AppConfig::new("https://x.io".into(), "T".into(), None);
     let mut bytes = b"MZ body __WEB2APP_TAIL__ body".to_vec();
     bytes.extend_from_slice(c.to_json().as_bytes());
     bytes.extend_from_slice(TAIL_MAGIC);
@@ -297,7 +407,7 @@ mod tests {
     write_tail(&f, &a).unwrap();
     assert_eq!(read_tail_from(&f).unwrap().unwrap(), a);
 
-    let b = AppConfig::new("https://other.io".into(), "B".into());
+    let b = AppConfig::new("https://other.io".into(), "B".into(), None);
     write_tail(&f, &b).unwrap();
     assert_eq!(read_tail_from(&f).unwrap().unwrap(), b);
 

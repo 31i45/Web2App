@@ -1,6 +1,8 @@
 //! ui.rs — 母版启动界面（内嵌 HTML，零外部资源文件）。
 //!
-//! 验收红线：界面仅 URL 输入框、打包按钮两个核心元素（logo 功能已裁剪）。
+//! 验收红线：界面仅 URL 输入框、图标选择、打包按钮三个核心元素。
+//! 图标选图用浏览器原生 input[type=file]+FileReader（W3C 标准，
+//! 三平台同一实现），图片字节经 base64 由 IPC 传给原生，无需绝对路径。
 
 use crate::builder;
 
@@ -33,6 +35,10 @@ pub fn form_html() -> &'static str {
     border: 1px solid #2b3142; border-radius: 8px; outline: none;
   }
   input:focus { border-color: #4f8cff; }
+  input[type=file] {
+    width: 100%; padding: 9px 11px; font-size: 13px; color: #aab2c5;
+    background: #0f1117; border: 1px solid #2b3142; border-radius: 8px; outline: none;
+  }
   button {
     width: 100%; margin-top: 26px; padding: 13px;
     font-size: 15px; font-weight: 600; cursor: pointer;
@@ -50,18 +56,36 @@ pub fn form_html() -> &'static str {
   <label for="url">网页 URL</label>
   <input type="text" id="url" placeholder="https://example.com" autofocus>
 
+  <label for="icon">应用图标（PNG，可选，缺省用 w2a）</label>
+  <input type="file" id="icon" accept="image/png">
+
   <button id="pack">打 包</button>
   <div class="status" id="status"></div>
 </div>
 <script>
   const $ = id => document.getElementById(id);
+  let iconB64 = '';
+
+  // 选图：浏览器原生控件 + FileReader 读字节（无需绝对路径）
+  $('icon').addEventListener('change', ev => {
+    const f = ev.target.files[0];
+    if (!f) { iconB64 = ''; return; }
+    const r = new FileReader();
+    r.onload = () => {
+      // dataURL: data:image/png;base64,<payload>
+      iconB64 = String(r.result).split(',')[1] || '';
+      $('status').style.color = '#7ee0a3';
+      $('status').textContent = '已选图标：' + f.name;
+    };
+    r.readAsDataURL(f);
+  });
 
   $('pack').addEventListener('click', () => {
     const url = $('url').value.trim();
     if (!url) { $('status').style.color = '#ff8f8f'; $('status').textContent = '请输入 URL'; return; }
     $('status').style.color = '#7ee0a3';
     $('status').textContent = '打包中…';
-    window.ipc.postMessage('pack:' + url);
+    window.ipc.postMessage('pack:' + url + '\n' + iconB64);
   });
 
   // 回车提交
@@ -87,9 +111,10 @@ mod tests {
   fn form_html_contains_core_elements_only() {
     let h = form_html();
     assert!(h.contains(r#"id="url""#));
+    assert!(h.contains(r#"id="icon""#));
     assert!(h.contains(r#"id="pack""#));
     assert!(h.contains(r#"id="status""#));
-    // logo 功能已裁剪，表单不得残留相关元素
-    assert!(!h.to_lowercase().contains("logo"));
+    // 选图走 FileReader 字节传输，不依赖文件绝对路径
+    assert!(h.contains("readAsDataURL"));
   }
 }
