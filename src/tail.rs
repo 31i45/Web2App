@@ -39,6 +39,9 @@ impl AppConfig {
   }
 
   /// 从尾部 payload JSON 解析。
+  ///
+  /// 隐藏契约：字段按 `url → title` 顺序扫描（`to_json` 固定此序，
+  /// 协议闭环内自产自销故安全；若字段顺序变更需同步改两处）。
   pub fn from_json(json: &str) -> Option<Self> {
     let (url, rest) = extract_string_field(json, "url")?;
     let (title, _) = extract_string_field(&rest, "title")?;
@@ -138,6 +141,9 @@ fn json_escape(s: &str) -> String {
 }
 
 /// 提取 `"key":"value"` 字符串字段，返回 (value, 该字段之后的剩余串)。
+///
+/// 已知取舍：剩余串逐字段整体拷贝是 O(n²)，payload 仅百字节级且字段仅两个，
+/// 按「禁止过度优化」红线保持简单实现。
 fn extract_string_field(json: &str, key: &str) -> Option<(String, String)> {
   let (raw, rest) = extract_raw_field(json, key)?;
   let v = unescape(raw.trim_matches('"'));

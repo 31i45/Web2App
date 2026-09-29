@@ -1,9 +1,10 @@
 //! main.rs — 唯一入口。
 //!
 //! 分发逻辑（一套代码三平台）：
-//! 1. `--master`：强制母版模式（产物的自繁殖入口）。
-//! 2. 尾部有配置 → 打开目标网页（普通 Web2App 应用）。
-//! 3. 尾部无配置 → 母版模式，显示打包表单。
+//! 1. `--set-icon <png> [target]`：工具模式，构建脚本自举母版 logo。
+//! 2. `--master`：强制母版模式（产物的自繁殖入口）。
+//! 3. 尾部有配置 → 打开目标网页（普通 Web2App 应用）。
+//! 4. 尾部无配置 → 母版模式，显示打包表单。
 //!
 //! Release 构建为 Windows GUI 子系统：双击运行不出现后台控制台。
 
@@ -11,6 +12,8 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod builder;
+mod icon;
+mod pe;
 mod tail;
 mod ui;
 mod webview;
@@ -28,16 +31,37 @@ enum FormEvent {
 fn main() {
   let args: Vec<String> = std::env::args().collect();
 
-  // 1) `--master` 强制母版模式：产物 exe 由此再次打包新应用（自繁殖入口）
+  // 1) 工具模式：`--set-icon <png> [target.exe]`，构建脚本自举母版 logo。
+  //    Windows 进程无法写自身（文件锁），故总是对「发布副本」注入。
+  if args.len() >= 3 && args.len() <= 4 && args[1] == "--set-icon" {
+    let png = std::path::PathBuf::from(&args[2]);
+    let target = args
+      .get(3)
+      .map(std::path::PathBuf::from)
+      .unwrap_or_else(|| tail::current_exe().unwrap_or_default());
+    match builder::tool_set_icon(&png, &target) {
+      Ok(_) => println!("icon injected"),
+      Err(e) => {
+        eprintln!("set-icon failed: {e}");
+        std::process::exit(1);
+      }
+    }
+    return;
+  }
+
+  // 2) `--master` 强制母版模式：产物 exe 由此再次打包新应用（自繁殖入口）
   if args.len() == 2 && args[1] == "--master" {
     return run_master();
   }
 
-  // 2) 读取尾部配置 → 决定母版/应用模式
+  // 3) 读取尾部配置 → 决定母版/应用模式
   match tail::read_tail() {
-    Ok(Some(c)) => webview::open_webview(c, None),
+    Ok(Some(c)) => webview::open_webview(c),
     Ok(None) => run_master(),
-    Err(_) => std::process::exit(1),
+    Err(e) => {
+      eprintln!("读取尾部配置失败: {e}");
+      std::process::exit(1);
+    }
   }
 }
 
@@ -93,16 +117,26 @@ struct Master {
 }
 
 impl Master {
-  /// 执行打包并回报状态。阻塞 UI 数秒（产物 <10MB，复制秒级完成）。
+  /// 执行打包并回报状态。阻塞 UI 数秒（favicon 拉取 ≤10s + 复制秒级完成）。
   fn on_pack(&mut self, url: String) {
     let filename = ui::product_filename(&url);
     let out_dir = dirs_of_current_exe();
     let out = out_dir.join(&filename);
 
-    match builder::pack(&out, &url) {
+    // favicon 获取：可选增强，任何失败不阻塞打包（产物照常生成，仅无图标）
+    let favicon = icon::fetch_favicon(&url);
+    let icon_note = match &favicon {
+      Some(v) => format!("，图标 {} 种尺寸", v.len()),
+      None => String::new(),
+    };
+
+    match builder::pack(&out, &url, favicon) {
       Ok(result) => {
         let kb = result.size as f64 / 1024.0;
-        self.set_status(&format!("完成：{}（{:.0} KB）", result.exe.display(), kb), true);
+        self.set_status(
+          &format!("完成：{}（{:.0} KB{}）", result.exe.display(), kb, icon_note),
+          true,
+        );
       }
       Err(e) => self.set_status(&format!("失败：{e}"), false),
     }
@@ -116,7 +150,9 @@ impl Master {
         text,
         if ok { "#7ee0a3" } else { "#ff8f8f" }
       );
-      let _ = w.evaluate_script(&js);
+      if let Err(e) = w.evaluate_script(&js) {
+        eprintln!("状态回写失败: {e}");
+      }
     }
   }
 }
@@ -135,11 +171,12 @@ mod tests {
 
   #[test]
   fn product_filename_sanitizes_host() {
-    assert_eq!(ui::product_filename("https://example.com"), "example.com.exe");
-    assert_eq!(ui::product_filename("https://a.b/c?d=1"), "a.b.exe");
+    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    assert_eq!(ui::product_filename("https://example.com"), format!("example.com{ext}"));
+    assert_eq!(ui::product_filename("https://a.b/c?d=1"), format!("a.b{ext}"));
     // 非 ASCII 字符替换为下划线
     let n = ui::product_filename("https://中文站.com");
-    assert!(n.ends_with(".com.exe"));
+    assert!(n.ends_with(&format!(".com{ext}")));
     assert!(n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'));
   }
 }

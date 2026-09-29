@@ -4,8 +4,8 @@
 
 use crate::builder;
 
-/// 母版表单页 HTML。全部样式内联，无网络请求、无外部依赖。
-pub fn form_html() -> String {
+/// 母版表单页 HTML（纯静态）。全部样式内联，无网络请求、无外部依赖。
+pub fn form_html() -> &'static str {
   r#"<!DOCTYPE html>
 <html>
 <head>
@@ -71,15 +71,25 @@ pub fn form_html() -> String {
 </script>
 </body>
 </html>"#
-  .to_string()
 }
 
-/// 从表单 URL 推导产物文件名：host → 安全文件名 + 平台后缀。
+/// 从表单 URL 推导产物文件名：安全 host + 平台可执行后缀（Windows .exe / Unix 无扩展）。
 pub fn product_filename(url: &str) -> String {
-  let host = builder::default_title(url)
-    .chars()
-    .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
-    .collect::<String>();
-  let base = if host.is_empty() { "web2app" } else { &host };
-  format!("{base}.exe")
+  let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+  format!("{}{}", builder::sanitize_host(url), ext)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn form_html_contains_core_elements_only() {
+    let h = form_html();
+    assert!(h.contains(r#"id="url""#));
+    assert!(h.contains(r#"id="pack""#));
+    assert!(h.contains(r#"id="status""#));
+    // logo 功能已裁剪，表单不得残留相关元素
+    assert!(!h.to_lowercase().contains("logo"));
+  }
 }
