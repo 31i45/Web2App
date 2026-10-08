@@ -86,4 +86,4 @@ cargo test --bin web2app    # 50 个单元测试
 cargo build --release       # Release（opt-level=z, lto, strip）
 ```
 
-依赖：`wry 0.57`（devtools only）、`tao 0.37`、`dunce 1`、`png 0.18`；构建期 `winres`（仅 Windows，不进运行时）。JSON/base64 手写，零 serde。
+依赖：`wry 0.57`（default 平台后端 + devtools）、`tao 0.37`、`dunce 1`、`png 0.18`；构建期 `winres`（仅 Windows，不进运行时）。JSON/base64 手写，零 serde。

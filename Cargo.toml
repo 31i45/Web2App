@@ -6,7 +6,9 @@ description = "Self-reproducing single-file cross-platform web-to-app packager"
 license = "MIT"
 
 [dependencies]
-wry = { version = "0.57", default-features = false, features = ["devtools"] }
+# default features = os-webview + x11：Linux 后端（gtk/webkit2gtk）由 os-webview
+# 开启——曾因 default-features=false 仅启 devtools 而关闭，Linux 编译 E0433。
+wry = { version = "0.57", features = ["devtools"] }
 tao = "0.37"
 dunce = "1"
 png = "0.18"
