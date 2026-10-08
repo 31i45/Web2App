@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Tests
+        run: cargo test
+
+      - name: Clippy (zero warnings, warnings as errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Red line - master exe must stay under 10MB
+        shell: pwsh
+        run: |
+          $size = (Get-Item target\release\web2app.exe).Length
+          if ($size -gt 10MB) { throw "web2app.exe exceeds 10MB red line: $size bytes" }
+          Write-Host "web2app.exe = $([math]::Round($size / 1KB)) KB (within 10MB red line)"

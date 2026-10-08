@@ -18,7 +18,9 @@ use wry::{WebContext, WebView};
 /// 用户选图 → 设为窗口图标；未选图 → 回落内嵌 w2a 默认图标
 /// （Windows 窗口类图标不自动读 exe 资源节，须显式设置）。
 /// 本函数是全项目唯一的「运行窗口」入口（深模块）。
-pub fn open_webview(config: AppConfig) {
+/// 构建失败返回 Err（如 Windows 缺 WebView2 运行时）——由调用方决定
+/// 如何呈现给用户（机制不预设死亡策略）。
+pub fn open_webview(config: AppConfig) -> Result<(), String> {
   let event_loop: tao::event_loop::EventLoop<()> = tao::event_loop::EventLoop::new();
   let icon = config
     .icon_png
@@ -28,7 +30,8 @@ pub fn open_webview(config: AppConfig) {
   let window = build_window(&event_loop, &config.title, Theme::Dark, icon);
   // WebContext 需存活至事件循环结束（数据目录指向系统应用数据区，不污染 exe 目录）
   let mut context = WebContext::new(Some(webview_data_dir(&config.url)));
-  let _webview = build_webview(&window, &config, &mut context);
+  let _webview = build_webview(&window, &config, &mut context)
+    .map_err(|e| format!("创建 WebView 失败：{e}\n（Windows 请安装 WebView2 运行时：https://developer.microsoft.com/microsoft-edge/webview2/）"))?;
 
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;
@@ -40,7 +43,9 @@ pub fn open_webview(config: AppConfig) {
       // 生命周期与 WebView 绑定：窗口即应用，关闭即退出，无驻留。
       *control_flow = ControlFlow::Exit;
     }
-  });
+  })
+  // tao 的 run() 返回 `!`（永不返回），`!` 直接收敛为本函数返回类型；
+  // 正常路径到此即退出进程，Err 仅发生在上方构建阶段。
 }
 
 /// 构建原生窗口（深色标题栏，与 UI 主题一致）。
@@ -64,16 +69,16 @@ pub fn build_window<T>(
 }
 
 /// 构建 WebView（产物形态：加载目标 URL）。devtools 仅 debug 构建启用（release 零开销）。
-pub fn build_webview(window: &Window, config: &AppConfig, context: &mut WebContext) -> WebView {
+/// 失败原因典型为系统 WebView 运行时缺失（Windows WebView2 / Linux WebKitGTK），
+/// 返回 Err 交由调用方呈现。
+pub fn build_webview(window: &Window, config: &AppConfig, context: &mut WebContext) -> Result<WebView, wry::Error> {
   let mut builder = wry::WebViewBuilder::new_with_web_context(context).with_url(&config.url);
 
   if cfg!(debug_assertions) {
     builder = builder.with_devtools(true);
   }
 
-  builder
-    .build(window)
-    .unwrap_or_else(|e| panic!("create webview: {e}"))
+  builder.build(window)
 }
 
 /// WebView 用户数据目录：系统应用数据区（按 host 分区），exe 旁不落盘。

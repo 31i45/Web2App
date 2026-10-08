@@ -113,6 +113,21 @@ pub fn product_filename(url: &str) -> String {
   format!("{}{}", builder::sanitize_host(url), ext)
 }
 
+/// 解析母版表单的 IPC 消息：`pack:<url>\n<base64 图标>`（图标行可缺失）。
+///
+/// 与 JS 端发送约定（`'pack:' + url + '\n' + iconB64`）配对；本函数是
+/// Rust 侧协议契约的行为级规格持有者。返回 None = 非打包消息（忽略）。
+/// URL 内空白由 JS 端剥除（防伪造第二行）；此处 splitn 使任何额外换行
+/// 天然落入图标区，不会污染 URL 字段。
+pub fn parse_pack_message(body: &str) -> Option<(String, Option<Vec<u8>>)> {
+  let rest = body.strip_prefix("pack:")?;
+  let mut lines = rest.splitn(2, '\n');
+  let url = lines.next().unwrap_or("").to_string();
+  let b64 = lines.next().unwrap_or("");
+  let icon = if b64.is_empty() { None } else { crate::tail::base64_decode(b64) };
+  Some((url, icon))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -138,5 +153,49 @@ mod tests {
     // 打包期间按钮禁用（防重复提交）
     assert!(h.contains("disabled = true"));
     assert!(h.contains("disabled"));
+  }
+
+  #[test]
+  fn parse_pack_message_with_icon() {
+    let msg = format!("pack:https://example.com\n{}", crate::tail::base64_encode(b"\x89PNG-icon"));
+    let (url, icon) = parse_pack_message(&msg).unwrap();
+    assert_eq!(url, "https://example.com");
+    assert_eq!(icon.as_deref(), Some(b"\x89PNG-icon".as_slice()));
+  }
+
+  #[test]
+  fn parse_pack_message_without_icon() {
+    // 无图标：第二行为空 → icon None
+    let (url, icon) = parse_pack_message("pack:https://example.com\n").unwrap();
+    assert_eq!(url, "https://example.com");
+    assert!(icon.is_none());
+    // 完全无换行分隔（仅 URL）→ 同样 None
+    let (url2, icon2) = parse_pack_message("pack:https://example.com").unwrap();
+    assert_eq!(url2, "https://example.com");
+    assert!(icon2.is_none());
+  }
+
+  #[test]
+  fn parse_pack_message_rejects_non_pack() {
+    assert!(parse_pack_message("hello:https://x.com\nQUJD").is_none());
+    assert!(parse_pack_message("").is_none());
+    assert!(parse_pack_message("pack").is_none());
+  }
+
+  #[test]
+  fn parse_pack_message_invalid_base64_degrades_to_no_icon() {
+    // 非法 base64 → 解码失败 → icon None（不阻塞打包，回落默认图标）
+    let (url, icon) = parse_pack_message("pack:https://example.com\n!!!!invalid!!!!").unwrap();
+    assert_eq!(url, "https://example.com");
+    assert!(icon.is_none());
+  }
+
+  #[test]
+  fn parse_pack_message_forged_second_line_stays_in_icon_field() {
+    // 伪造防御规格：URL 若含换行（绕过 JS 剥空白），第二段永远归图标区，
+    // URL 字段只取第一行——图标解析失败回落默认，URL 不被注入污染。
+    let (url, icon) = parse_pack_message("pack:https://evil.com\nAAAAnot-base64###").unwrap();
+    assert_eq!(url, "https://evil.com");
+    assert!(icon.is_none());
   }
 }

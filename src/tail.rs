@@ -467,4 +467,73 @@ mod tests {
     assert!(AppConfig::from_json(r#"{"title":"t","url":"u"}"#).is_none());
   }
 
+  /// 确定性 LCG（零依赖、可复现）。对抗性 fuzz 的最小常驻形态：
+  /// 曾在临时 fuzz 中以此输入族抓出 trim_matches 转义引号截断 bug，
+  /// 固化为永久回归，守护手写 JSON 转义的每个边界。
+  #[test]
+  fn fuzz_roundtrip_adversarial_palette() {
+    let palette: [&str; 13] = [
+      "\"", "\\", "\n", "\r", "\t", "\u{1}", "\u{7F}",
+      "中", "\u{10FFFF}", "\",\"icon\":\"", "\",\"title\":\"evil",
+      "__WEB2APP_TAIL__", "a\"b\\c\nd",
+    ];
+    let mut seed: u64 = 0xC0FFEE;
+    let mut next = || {
+      seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+      (seed >> 33) as usize
+    };
+    for round in 0..200 {
+      let mk = |next: &mut dyn FnMut() -> usize| -> String {
+        let n = next() % 12;
+        (0..n).map(|_| palette[next() % palette.len()]).collect()
+      };
+      let url = format!("https://{}.com/{}", mk(&mut next), mk(&mut next));
+      let title = mk(&mut next);
+      let icon = if next() % 2 == 0 {
+        let len = next() % 48;
+        Some((0..len).map(|i| (i.wrapping_mul(37).wrapping_add(11)) as u8).collect::<Vec<u8>>())
+      } else {
+        None
+      };
+      let cfg = AppConfig::new(url, title, icon);
+      let parsed = AppConfig::from_json(&cfg.to_json());
+      assert_eq!(parsed, Some(cfg), "adversarial roundtrip failed at round {round}");
+    }
+  }
+
+  /// 协议帧边界对抗：随机字节、截断、长度篡改、正文伪魔数——零 panic 是底线。
+  #[test]
+  fn fuzz_tail_frame_never_panics() {
+    let mut seed: u64 = 0xBEEF;
+    let mut next = || {
+      seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+      seed >> 11
+    };
+    // 随机字节流（含恰好 24 字节帧边界）
+    for _ in 0..500 {
+      let len = (next() % 300) as usize;
+      let bytes: Vec<u8> = (0..len).map(|_| (next() % 256) as u8).collect();
+      let _ = extract_tail(&bytes);
+      let _ = strip_tail(&bytes);
+    }
+    // 合法帧 + 逐截断
+    let cfg = AppConfig::new("https://x.io".into(), "x.io".into(), Some(vec![1, 2, 3, 255]));
+    let payload = cfg.to_json();
+    let mut frame = b"MZ exe body..........".to_vec();
+    frame.extend_from_slice(payload.as_bytes());
+    frame.extend_from_slice(TAIL_MAGIC);
+    frame.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    for cut in 0..=frame.len() {
+      let _ = extract_tail(&frame[..cut]);
+    }
+    // 长度字段篡改（含 u64 极值与越界值）
+    for len_val in [0u64, 1, 23, 24, 25, u64::MAX, u64::MAX - 1, 1 << 32] {
+      let mut b = b"MZ body".to_vec();
+      b.extend_from_slice(payload.as_bytes());
+      b.extend_from_slice(TAIL_MAGIC);
+      b.extend_from_slice(&len_val.to_le_bytes());
+      let _ = extract_tail(&b);
+    }
+  }
+
 }

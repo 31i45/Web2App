@@ -37,11 +37,18 @@ pub fn default_title(url: &str) -> String {
 
 /// URL → host → 安全字符序列（单点持有：ui 产物文件名与 webview 数据目录共用）。
 /// 非 `[A-Za-z0-9.-]` 字符替换为下划线。
+/// 恰为 `..` / `.` 的段回落默认名：此类 host（仅手工伪造的尾部可产生）
+/// 会令数据目录上移或指向当前目录，构成路径遍历面。
 pub fn sanitize_host(url: &str) -> String {
-  default_title(url)
+  let s: String = default_title(url)
     .chars()
     .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
-    .collect()
+    .collect();
+  if s == ".." || s == "." {
+    "Web2App".to_string()
+  } else {
+    s
+  }
 }
 
 /// 校验 URL 合法性（scheme http/https）。
@@ -153,6 +160,17 @@ mod tests {
     assert_eq!(sanitize_host("https://a_b~c.com"), "a_b_c.com");
     // 兜底：空 URL → 默认标题
     assert_eq!(sanitize_host(""), "Web2App");
+  }
+
+  #[test]
+  fn sanitize_host_rejects_dot_path_components() {
+    // 路径组件安全：host 恰为 .. / . 时会令数据目录上移或指向当前目录
+    // （手工构造的尾部配置可触发），必须回落默认名而非原样输出。
+    assert_eq!(sanitize_host("https://.."), "Web2App");
+    assert_eq!(sanitize_host("https://."), "Web2App");
+    // 恰好是两个点以外的点形态不构成路径遍历（a..b / ... 均为普通目录名）
+    assert_eq!(sanitize_host("https://a..b"), "a..b");
+    assert_eq!(sanitize_host("https://...com"), "...com");
   }
 
   #[test]

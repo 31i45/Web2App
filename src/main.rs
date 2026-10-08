@@ -36,12 +36,15 @@ fn main() {
 
   // 2) 读取尾部配置 → 决定母版/应用模式
   match tail::read_tail() {
-    Ok(Some(c)) => webview::open_webview(c),
-    Ok(None) => run_master(),
-    Err(e) => {
-      eprintln!("读取尾部配置失败: {e}");
-      std::process::exit(1);
+    Ok(Some(c)) => {
+      if let Err(e) = webview::open_webview(c) {
+        show_fatal_and_exit(&e);
+      }
     }
+    Ok(None) => run_master(),
+    Err(e) => show_fatal_and_exit(&format!(
+      "读取尾部配置失败：{e}\n（文件可能已损坏，请重新获取本程序）"
+    )),
   }
 }
 
@@ -58,21 +61,21 @@ fn run_master() {
   // 母版表单 WebView：固定数据目录（不打扰任何 exe 目录）
   let mut context = WebContext::new(Some(webview::webview_data_dir("web2app-master")));
 
-  let webview = wry::WebViewBuilder::new_with_web_context(&mut context)
+  let webview = match wry::WebViewBuilder::new_with_web_context(&mut context)
     .with_html(ui::form_html())
     .with_ipc_handler(move |req| {
-      // JS 端约定：`pack:<url>\n<base64 图标>`（图标可选）
-      let body = req.into_body();
-      if let Some(rest) = body.strip_prefix("pack:") {
-        let mut lines = rest.splitn(2, '\n');
-        let url = lines.next().unwrap_or("").to_string();
-        let b64 = lines.next().unwrap_or("");
-        let icon = if b64.is_empty() { None } else { tail::base64_decode(b64) };
+      // 协议契约的行为级规格见 ui::parse_pack_message 测试
+      if let Some((url, icon)) = ui::parse_pack_message(&req.into_body()) {
         let _ = proxy.send_event(FormEvent::Pack { url, icon });
       }
     })
     .build(&window)
-    .expect("create master webview");
+  {
+    Ok(w) => w,
+    Err(e) => show_fatal_and_exit(&format!(
+      "创建母版界面失败：{e}\n（Windows 请安装 WebView2 运行时：https://developer.microsoft.com/microsoft-edge/webview2/）"
+    )),
+  };
 
   let mut master = Master {
     webview: Some(webview),
@@ -106,7 +109,7 @@ impl Master {
   /// 执行打包并回报状态。阻塞 UI 数秒（纯本地复制，无网络等待）。
   fn on_pack(&mut self, url: String, icon: Option<Vec<u8>>) {
     let filename = ui::product_filename(&url);
-    let out_dir = dirs_of_current_exe();
+    let out_dir = dir_of_current_exe();
     let out = out_dir.join(&filename);
 
     // 图标可选：None / 解码失败 → 产物继承母版 w2a 图标，不阻塞打包
@@ -149,11 +152,48 @@ impl Master {
 }
 
 /// 产物输出目录：母版所在目录（自包含，不产生缓存目录）。
-fn dirs_of_current_exe() -> std::path::PathBuf {
+fn dir_of_current_exe() -> std::path::PathBuf {
   tail::current_exe()
     .ok()
     .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+/// 致命错误的用户可见呈现后退出（返回 `!`）。
+///
+/// 动机：release 为 Windows GUI 子系统且 `panic = "abort"`，`eprintln` 无人看见、
+/// panic 无输出——错误必须以用户可感知的方式呈现，否则双击即"静默死亡"。
+/// Windows 用 MessageBoxW（`extern` 直接声明，零新依赖）；Unix 有 stderr 直写。
+#[cfg(target_os = "windows")]
+fn show_fatal_and_exit(msg: &str) -> ! {
+  #[link(name = "user32")]
+  extern "system" {
+    fn MessageBoxW(
+      hwnd: *mut core::ffi::c_void,
+      text: *const u16,
+      caption: *const u16,
+      utype: u32,
+    ) -> i32;
+  }
+  const MB_OK: u32 = 0x0;
+  const MB_ICONERROR: u32 = 0x10;
+  let text: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+  let caption: Vec<u16> = "Web2App".encode_utf16().chain(std::iter::once(0)).collect();
+  unsafe {
+    MessageBoxW(
+      std::ptr::null_mut(),
+      text.as_ptr(),
+      caption.as_ptr(),
+      MB_OK | MB_ICONERROR,
+    );
+  }
+  std::process::exit(1)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_and_exit(msg: &str) -> ! {
+  eprintln!("Web2App 致命错误：{msg}");
+  std::process::exit(1)
 }
 
 #[cfg(test)]
