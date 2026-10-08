@@ -6,6 +6,16 @@
 
 ## 快速开始
 
+从 [Releases](https://github.com/31i45/Web2App/releases) 下载对应平台母版（CI 构建，附 SHA256SUMS 校验）：
+
+| 平台 | 资产 | 运行时要求 |
+|---|---|---|
+| Windows x64 | `Web2App-v*-x86_64-pc-windows-msvc.exe` | [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win11 自带） |
+| Linux x64 | `Web2App-v*-x86_64-unknown-linux-gnu.tar.gz` | WebKitGTK 4.1（主流发行版自带） |
+| macOS（Apple Silicon / Intel） | `Web2App-v*-aarch64/x86_64-apple-darwin.tar.gz` | 系统自带 WKWebView |
+
+或本地构建（dist/ 仅本地使用，不入库；发布物一律由 CI 构建）：
+
 ```powershell
 # 一键构建（测试 + Release + 母版装配）
 .\build.ps1
@@ -26,7 +36,7 @@
 
 | 指标 | 目标 | 实测 |
 |---|---|---|
-| 单文件体积 | < 10 MB | 644 KB |
+| 单文件体积 | < 10 MB | 732 KB |
 | 冷启动 | < 2 s | 秒级 |
 | 关闭残留 | 无 | 进程/WebView2 子进程全部退出 |
 | 运行副作用 | 无 | 无后台控制台；exe 目录零落盘 |
@@ -72,7 +82,7 @@ assets/w2a.ico   # 母版图标源（白底圆角 W2A 缎带字标）
 ## 开发
 
 ```powershell
-cargo test --bin web2app    # 39 个单元测试
+cargo test --bin web2app    # 50 个单元测试
 cargo build --release       # Release（opt-level=z, lto, strip）
 ```
 

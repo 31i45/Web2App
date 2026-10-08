@@ -1,6 +1,5 @@
 /target/
 /.temp/
 
-# dist 只提交母版，本地产物（如测试生成的 *.exe）不入库
-/dist/*
-!/dist/Web2App.exe
+# dist 为本地构建产物，不入库；发布物一律由 CI 构建并发布到 GitHub Releases
+/dist/

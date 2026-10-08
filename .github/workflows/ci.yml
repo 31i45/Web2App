@@ -2,15 +2,31 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
 
-# 默认最小权限；release job 单独提升为 contents: write（仅发布时）
+# 同一 ref 的新推送取消旧运行；tag 发布运行不取消（保证发布完整性）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+# 最小权限：默认只读；release job 单独提升 contents: write
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  # 每次推送/PR：三平台矩阵验证（测试 + 严格 clippy + release 构建 + 10MB 红线）
   verify:
-    runs-on: windows-latest
+    name: verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,53 +34,126 @@ jobs:
         with:
           components: clippy
 
+      # wry/tao 在 Linux 需要 WebKitGTK 4.1 系统库（构建期头文件）
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Tests
-        run: cargo test
+        run: cargo test --locked
 
       - name: Clippy (zero warnings, warnings as errors)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Release build
-        run: cargo build --release
-
-      - name: Red line - master exe must stay under 10MB
-        shell: pwsh
+      - name: Release build + 10MB red line
+        shell: bash
         run: |
-          $size = (Get-Item target\release\web2app.exe).Length
-          if ($size -gt 10MB) { throw "web2app.exe exceeds 10MB red line: $size bytes" }
-          Write-Host "web2app.exe = $([math]::Round($size / 1KB)) KB (within 10MB red line)"
+          cargo build --release --locked
+          bin="target/release/web2app"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="target/release/web2app.exe"; fi
+          size=$(wc -c < "$bin")
+          if [ "$size" -gt 10485760 ]; then
+            echo "::error::master exceeds 10MB red line ($size bytes)"
+            exit 1
+          fi
+          echo "master: $size bytes (within 10MB red line)"
 
-  # 发布：推送 v* 标签触发（先过 verify 关卡），把 dist 母版发布为 GitHub Release。
-  # 资产：Web2App.exe + SHA256SUMS.txt（GNU sha256sum 标准格式，可校验完整性）。
-  release:
+  # 发布（仅 v* 标签）：四目标矩阵构建原生二进制，经 artifact 汇总到 release job
+  build:
+    name: build (${{ matrix.target }})
     needs: verify
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build, red-line check, package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          target="${{ matrix.target }}"
+          cargo build --release --locked --target "$target"
+          ext=""
+          case "$target" in *windows*) ext=".exe";; esac
+          bin="target/${target}/release/web2app${ext}"
+          size=$(wc -c < "$bin")
+          if [ "$size" -gt 10485760 ]; then
+            echo "::error::${bin} exceeds 10MB red line ($size bytes)"
+            exit 1
+          fi
+          mkdir -p dist
+          if [ -n "$ext" ]; then
+            cp "$bin" "dist/Web2App-${tag}-${target}.exe"
+          else
+            cp "$bin" Web2App
+            tar -czf "dist/Web2App-${tag}-${target}.tar.gz" Web2App
+            rm -f Web2App
+          fi
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # 汇总四平台产物 + SHA256SUMS → GitHub Release（发布物唯一来源）
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Download all platform binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
-      - name: Build master
-        run: cargo build --release
-
-      - name: Assemble dist + integrity checksum
-        shell: pwsh
+      - name: Generate checksums
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target\release\web2app.exe dist\Web2App.exe -Force
-          $size = (Get-Item dist\Web2App.exe).Length
-          if ($size -gt 10MB) { throw "dist master exceeds 10MB red line: $size bytes" }
-          $hash = (Get-FileHash dist\Web2App.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  Web2App.exe" | Set-Content dist\SHA256SUMS.txt
-          Write-Host "dist master: $([math]::Round($size / 1KB)) KB, SHA256 = $hash"
+          cd dist
+          sha256sum Web2App-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
-      - name: Create GitHub Release and upload dist assets
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          gh release create $tag dist/Web2App.exe dist/SHA256SUMS.txt --title "Web2App $tag" --generate-notes
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "Web2App ${GITHUB_REF_NAME}" \
+            --generate-notes
