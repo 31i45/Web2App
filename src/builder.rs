@@ -276,7 +276,8 @@ mod tests {
 
     let result = pack(&dir.join("product.bin"), "https://example.com", None);
     assert!(result.is_err());
-    // 关键断言：不留 tmp 残渣
-    assert!(!dir.join("product.bin.tmp.pack").exists(), "tmp residue leaked");
+    // 关键断言：不留 tmp 残渣。tmp 名 = out.with_extension("tmp.pack")，
+    // 即 product.tmp.pack（with_extension 替换 .bin 而非追加）。
+    assert!(!dir.join("product.tmp.pack").exists(), "tmp residue leaked");
   }
 }
