@@ -160,8 +160,11 @@ fn json_escape(s: &str) -> String {
 /// 按「禁止过度优化」红线保持简单实现。
 fn extract_string_field(json: &str, key: &str) -> Option<(String, String)> {
   let (raw, rest) = extract_raw_field(json, key)?;
-  let v = unescape(raw.trim_matches('"'));
-  Some((v, rest))
+  // raw 必形如 "\"...\""：扫描已保证首字符是开定界引号、末字符是未转义的
+  // 终止引号。必须精确剥这一对——trim_matches 不理解转义，会把值内结尾
+  // 转义引号（如 url "...?q=\"x\""）的引号字符也剥掉，造成数据损坏。
+  let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
+  Some((unescape(inner), rest))
 }
 
 /// 提取字段原始文本（含外层引号），返回 (带引号 value, 该字段之后的剩余串)。
@@ -429,6 +432,39 @@ mod tests {
   #[test]
   fn extract_field_missing_key_returns_none() {
     assert!(extract_string_field(r#"{"a":"b"}"#, "url").is_none());
+  }
+
+  #[test]
+  fn json_roundtrip_value_ending_with_quote() {
+    // 回归：值以引号结尾（真实场景：URL 带引号查询参数）。
+    // 旧实现 trim_matches('"') 不理解转义，会把 \" 的引号字符也剥掉，
+    // `?q="x"` 损坏为 `?q="x`。
+    let c = AppConfig::new(
+      "https://example.com/?q=\"x\"".into(),
+      "example.com".into(),
+      None,
+    );
+    let parsed = AppConfig::from_json(&c.to_json()).unwrap();
+    assert_eq!(parsed.url, "https://example.com/?q=\"x\"");
+    assert_eq!(parsed.title, "example.com");
+  }
+
+  #[test]
+  fn json_roundtrip_quote_only_and_leading_quote() {
+    // 值本身就是单个引号 / 以引号开头：精确定界符剥离的极端边界
+    let c = AppConfig::new("\"".into(), "\"lead".into(), None);
+    let parsed = AppConfig::from_json(&c.to_json()).unwrap();
+    assert_eq!(parsed.url, "\"");
+    assert_eq!(parsed.title, "\"lead");
+    // 空值 roundtrip
+    let e = AppConfig::new("".into(), "".into(), None);
+    assert_eq!(AppConfig::from_json(&e.to_json()).unwrap(), e);
+  }
+
+  #[test]
+  fn extract_field_out_of_order_returns_none() {
+    // 隐藏契约：字段顺序必须 url → title（to_json 固定此序，协议闭环自产自销）
+    assert!(AppConfig::from_json(r#"{"title":"t","url":"u"}"#).is_none());
   }
 
 }
