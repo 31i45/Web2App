@@ -43,7 +43,7 @@ src/
 └── icon.rs      # 图标域：PNG 解码与窗口图标转换（tao Icon，跨平台统一）
 
 build.rs         # 母版 w2a 图标经 .rc 编译进 exe（winres，仅 Windows）
-assets/w2a.ico   # 母版图标源（深蓝渐变 + 白色 w2a）
+assets/w2a.ico   # 母版图标源（白底圆角 W2A 缎带字标）
 ```
 
 跨平台策略：同一功能优先同一实现——图标显示拆为两条通道，各自采用最可靠的机制，三平台一套代码，无手写 PE 手术。
