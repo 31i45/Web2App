@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# 默认最小权限；release job 单独提升为 contents: write（仅发布时）
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: windows-latest
@@ -29,3 +33,38 @@ jobs:
           $size = (Get-Item target\release\web2app.exe).Length
           if ($size -gt 10MB) { throw "web2app.exe exceeds 10MB red line: $size bytes" }
           Write-Host "web2app.exe = $([math]::Round($size / 1KB)) KB (within 10MB red line)"
+
+  # 发布：推送 v* 标签触发（先过 verify 关卡），把 dist 母版发布为 GitHub Release。
+  # 资产：Web2App.exe + SHA256SUMS.txt（GNU sha256sum 标准格式，可校验完整性）。
+  release:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build master
+        run: cargo build --release
+
+      - name: Assemble dist + integrity checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\web2app.exe dist\Web2App.exe -Force
+          $size = (Get-Item dist\Web2App.exe).Length
+          if ($size -gt 10MB) { throw "dist master exceeds 10MB red line: $size bytes" }
+          $hash = (Get-FileHash dist\Web2App.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  Web2App.exe" | Set-Content dist\SHA256SUMS.txt
+          Write-Host "dist master: $([math]::Round($size / 1KB)) KB, SHA256 = $hash"
+
+      - name: Create GitHub Release and upload dist assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag dist/Web2App.exe dist/SHA256SUMS.txt --title "Web2App $tag" --generate-notes
