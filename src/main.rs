@@ -52,8 +52,9 @@ fn run_master() {
   // IPC 事件经 EventLoopProxy 投递到事件循环
   let proxy = event_loop.create_proxy();
 
-  // 母版窗口不设用户图标：自动回落 exe 资源图标（w2a，由 build.rs 编译进 exe）
-  let window = webview::build_window(&event_loop, "Web2App 打包器", Theme::Dark, None);
+  // 母版窗口图标：内嵌 w2a（Windows 窗口类图标不自动读 exe 资源节，须显式设置）
+  let icon = icon::default_window_icon();
+  let window = webview::build_window(&event_loop, "Web2App 打包器", Theme::Dark, icon);
   // 母版表单 WebView：固定数据目录（不打扰任何 exe 目录）
   let mut context = WebContext::new(Some(webview::webview_data_dir("web2app-master")));
 
@@ -132,11 +133,11 @@ impl Master {
     }
   }
 
-  /// 更新页面状态文字（status div）。
+  /// 更新页面状态文字（status div）并恢复打包按钮（防重复提交的解锁点）。
   fn set_status(&mut self, text: &str, ok: bool) {
     if let Some(w) = self.webview.as_ref() {
       let js = format!(
-        "(()=>{{const s=document.getElementById('status');if(s){{s.textContent={:?};s.style.color={:?};}}}})();",
+        "(()=>{{const s=document.getElementById('status');if(s){{s.textContent={:?};s.style.color={:?};}}const b=document.getElementById('pack');if(b){{b.disabled=false;}}}})();",
         text,
         if ok { "#7ee0a3" } else { "#ff8f8f" }
       );

@@ -61,7 +61,8 @@ assets/w2a.ico   # 母版图标源（深蓝渐变 + 白色 w2a）
 ### 图标机制（两条通道，各自最可靠的机制）
 
 - **文件图标**（Explorer/任务栏）：母版 w2a 图标经 `.rc` 资源脚本由链接器编译进 exe（`build.rs` + `assets/w2a.ico`）；产物字节级继承母版，零注入代码。
-- **窗口图标**（标题栏/运行时任务栏）：用户选图以 base64 内嵌尾部配置，产物启动时经 tao `with_window_icon` 设置（三平台同一 API）；未选图自动回落 exe 资源图标（w2a）。
+- **窗口图标**（标题栏/运行时任务栏）：用户选图以 base64 内嵌尾部配置，产物启动时经 tao `with_window_icon` 设置（三平台同一 API）；未选图自动回落内嵌 w2a 默认图。
+- **边界防御**：选图限 2MB（防产物膨胀）；PNG 画布限 4096×4096 像素（防解压炸弹）；超限/解码失败均安全回落默认图标，不阻塞。
 - **机制边界**：Explorer 文件列表中产物恒显示 w2a 图标（不随选图变化）；运行后标题栏与任务栏显示用户图标。
 
 ## 待解决问题
@@ -71,7 +72,7 @@ assets/w2a.ico   # 母版图标源（深蓝渐变 + 白色 w2a）
 ## 开发
 
 ```powershell
-cargo test --bin web2app    # 35 个单元测试
+cargo test --bin web2app    # 39 个单元测试
 cargo build --release       # Release（opt-level=z, lto, strip）
 ```
 

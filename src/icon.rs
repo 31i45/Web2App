@@ -3,17 +3,32 @@
 //! 图标显示的两条通道（第一性原理拆分）：
 //! - **文件图标**（Explorer/任务栏）：母版由 build.rs 经 `.rc` 编译 w2a 图标，
 //!   产物字节级继承，无需任何注入（pe 手术已整体删除）；
-//! - **窗口图标**（标题栏/运行时任务栏）：本模块 `window_icon` 把尾部配置中的
-//!   用户 PNG 转为 tao Icon，三平台同一 API。
+//! - **窗口图标**（标题栏/运行时任务栏）：本模块把尾部配置中的用户 PNG
+//!   （或内嵌 w2a 默认图）转为 tao Icon，三平台同一 API。
 //!
-//! 用户未选图 → 尾部无 icon 字段 → 窗口自动回落 exe 资源图标（w2a）。
+//! 关键事实：Windows 窗口类图标从不自动回落 exe `.rsrc` 资源——
+//! 未显式设置时标题栏显示系统默认图标。故「未选用户图」必须主动
+//! 设为内嵌 w2a 图标（`default_window_icon`），而非依赖资源节。
 
 use tao::window::Icon;
 
-/// PNG → RGBA8（仅 RGB/RGBA 8bit，其余返回 None）。
+/// PNG 像素总量上限（解压炸弹防御）：4096×4096 = 16.7M 像素 ≈ 67MB RGBA。
+/// 图标场景远用不到；超限直接拒绝，避免「小文件大画布」拖垮内存。
+const MAX_PIXELS: u64 = 4096 * 4096;
+
+/// 尺寸是否在安全限内（含 u32 乘法溢出防御）。
+fn dims_within_limit(w: u32, h: u32) -> bool {
+  u64::from(w) * u64::from(h) <= MAX_PIXELS
+}
+
+/// PNG → RGBA8（仅 RGB/RGBA 8bit，其余返回 None；尺寸超限返回 None）。
 pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
   let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
   let mut reader = decoder.read_info().ok()?;
+  // 炸弹防御：read_info 已解析 IHDR，在分配像素缓冲前拒绝超限画布
+  if !dims_within_limit(reader.info().width, reader.info().height) {
+    return None;
+  }
   let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
   let info = reader.next_frame(&mut buf).ok()?;
   let rgba = match info.color_type {
@@ -21,7 +36,7 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     png::ColorType::Rgb => {
       let n = info.buffer_size();
       let mut out = Vec::with_capacity(n / 3 * 4);
-      for px in buf[..n].chunks_exact(3) {
+      for px in buf[..n].as_chunks::<3>().0 {
         out.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
       }
       out
@@ -67,7 +82,7 @@ pub fn resize_box(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
 /// 用户 PNG → tao 窗口图标（跨平台统一入口）。
 ///
 /// 超过 256px 的源图 box 缩到 256（系统图标上限，兼顾体积与清晰度）；
-/// 解码失败返回 None（调用方回落 exe 资源图标，不阻塞运行）。
+/// 解码失败返回 None（调用方回落内嵌默认图标，不阻塞运行）。
 pub fn window_icon(png: &[u8]) -> Option<Icon> {
   let (w, h, rgba) = decode_png(png)?;
   if w == 0 || h == 0 {
@@ -84,6 +99,15 @@ pub fn window_icon(png: &[u8]) -> Option<Icon> {
     (w, h, rgba)
   };
   Icon::from_rgba(data, rw, rh).ok()
+}
+
+/// 内嵌 w2a 默认图标（256px PNG，编译期打入二进制，~28KB）。
+///
+/// 用途：「未选用户图」时的窗口图标回落。Windows 窗口类图标不会自动
+/// 读 exe 资源节，必须显式设置；此路径三平台统一（macOS/Linux 任务栏同理）。
+pub fn default_window_icon() -> Option<Icon> {
+  const W2A_PNG: &[u8] = include_bytes!("../assets/logo_256.png");
+  window_icon(W2A_PNG)
 }
 
 #[cfg(test)]
@@ -176,5 +200,29 @@ mod tests {
   fn window_icon_rejects_garbage() {
     assert!(window_icon(b"garbage").is_none());
     assert!(window_icon(&[]).is_none());
+  }
+
+  #[test]
+  fn dims_within_limit_rejects_bomb() {
+    // 正常图标尺寸
+    assert!(dims_within_limit(256, 256));
+    assert!(dims_within_limit(4096, 4096)); // 恰好等于上限
+    // 超限（炸弹画布）：5000×5000 = 25M 像素
+    assert!(!dims_within_limit(5000, 5000));
+    assert!(!dims_within_limit(30000, 30000));
+    // 极端长宽比：u32 乘法溢出防御
+    assert!(!dims_within_limit(u32::MAX, u32::MAX));
+    assert!(!dims_within_limit(u32::MAX, 2));
+    // 1×u32::MAX 不溢出 u64 但超限
+    assert!(!dims_within_limit(1, u32::MAX));
+    // 零尺寸：0 像素 ≤ 上限（后续 window_icon 另行拒绝）
+    assert!(dims_within_limit(0, 0));
+  }
+
+  #[test]
+  fn default_window_icon_loads() {
+    // 编译期内嵌的 w2a PNG 能解码为 Icon
+    let icon = default_window_icon();
+    assert!(icon.is_some(), "embedded w2a icon failed to decode");
   }
 }

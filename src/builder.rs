@@ -86,23 +86,34 @@ pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result
 
   let config = AppConfig::new(url.to_string(), title, icon_png);
   let tmp_out = out_path.with_extension("tmp.pack");
-  fs::write(&tmp_out, &product)?;
-  let size = tail::write_tail(&tmp_out, &config)?;
 
-  // 原子落盘：先写临时文件再 rename，避免半写产物
-  if let Some(dir) = out_path.parent() {
-    fs::create_dir_all(dir)?;
-  }
-  match fs::rename(&tmp_out, out_path) {
-    Ok(_) => {}
-    // Windows 跨盘 rename 失败时回退 copy+delete
-    Err(_) => {
-      fs::copy(&tmp_out, out_path)?;
+  // 组装与落盘；任一步失败都保证临时文件被清理（不留残渣）
+  let built = (|| -> io::Result<u64> {
+    fs::write(&tmp_out, &product)?;
+    let size = tail::write_tail(&tmp_out, &config)?;
+    if let Some(dir) = out_path.parent() {
+      fs::create_dir_all(dir)?;
+    }
+    // 原子落盘：先写临时文件再 rename，避免半写产物。
+    // rename 失败常见原因：目标被占用（Windows 文件锁，如旧产物正在运行）、
+    // 跨盘移动；回退 copy+delete。
+    match fs::rename(&tmp_out, out_path) {
+      Ok(_) => {}
+      Err(_) => {
+        fs::copy(&tmp_out, out_path)?;
+        let _ = fs::remove_file(&tmp_out);
+      }
+    }
+    Ok(size)
+  })();
+
+  match built {
+    Ok(size) => Ok(BuildOutput { exe: out_path.to_path_buf(), size }),
+    Err(e) => {
       let _ = fs::remove_file(&tmp_out);
+      Err(e)
     }
   }
-
-  Ok(BuildOutput { exe: out_path.to_path_buf(), size })
 }
 
 #[cfg(test)]
@@ -234,5 +245,20 @@ mod tests {
     pack(&out, "https://second.com", None).unwrap();
     let size3 = fs::metadata(&out).unwrap().len();
     assert_eq!(size2, size3);
+  }
+
+  #[test]
+  fn pack_failure_leaves_no_tmp_residue() {
+    // 失败路径清理：目标路径是一个目录（rename/copy 均失败），
+    // 断言报错且临时文件不残留
+    let dir = std::env::temp_dir().join("web2app_pack_fail");
+    fs::create_dir_all(&dir).unwrap();
+    // 占位目录充当产物目标：file → dir 的 rename/copy 必然失败
+    fs::create_dir_all(dir.join("product.bin")).unwrap();
+
+    let result = pack(&dir.join("product.bin"), "https://example.com", None);
+    assert!(result.is_err());
+    // 关键断言：不留 tmp 残渣
+    assert!(!dir.join("product.bin.tmp.pack").exists(), "tmp residue leaked");
   }
 }

@@ -15,11 +15,16 @@ use wry::{WebContext, WebView};
 /// 打开一个 WebView 窗口并阻塞至窗口关闭。
 ///
 /// `config` 提供目标 URL、标题与可选用户图标（设为窗口图标，跨平台）。
-/// 未选图 → 不设置 → 窗口自动回落 exe 资源图标（母版 w2a）。
+/// 用户选图 → 设为窗口图标；未选图 → 回落内嵌 w2a 默认图标
+/// （Windows 窗口类图标不自动读 exe 资源节，须显式设置）。
 /// 本函数是全项目唯一的「运行窗口」入口（深模块）。
 pub fn open_webview(config: AppConfig) {
   let event_loop: tao::event_loop::EventLoop<()> = tao::event_loop::EventLoop::new();
-  let icon = config.icon_png.as_deref().and_then(crate::icon::window_icon);
+  let icon = config
+    .icon_png
+    .as_deref()
+    .and_then(crate::icon::window_icon)
+    .or_else(crate::icon::default_window_icon);
   let window = build_window(&event_loop, &config.title, Theme::Dark, icon);
   // WebContext 需存活至事件循环结束（数据目录指向系统应用数据区，不污染 exe 目录）
   let mut context = WebContext::new(Some(webview_data_dir(&config.url)));
@@ -40,7 +45,7 @@ pub fn open_webview(config: AppConfig) {
 
 /// 构建原生窗口（深色标题栏，与 UI 主题一致）。
 /// 泛型 T：事件循环自定义事件类型（母版用 FormEvent，产物用 ()）。
-/// `icon`：用户图标（None = 回落 exe 资源图标）。
+/// `icon`：窗口图标（None = 不设，Windows 下显示系统默认）。
 pub fn build_window<T>(
   event_loop: &tao::event_loop::EventLoop<T>,
   title: &str,
@@ -82,6 +87,9 @@ pub fn webview_data_dir(url: &str) -> PathBuf {
 /// 数据基目录的跨平台探测链（无属性级 cfg 分裂，一屏读全）：
 /// Windows `%LOCALAPPDATA%` → Unix `$XDG_DATA_HOME` →
 /// macOS `~/Library/Application Support` / Linux `~/.local/share` → 兜底 temp。
+///
+/// 语义说明：`XDG_DATA_HOME` 在探测链中先于平台 HOME 分支——若 macOS 用户
+/// 显式设置过该变量则优先采用（视为用户覆盖，三平台同一规则，不做平台例外）。
 fn data_base_dir() -> PathBuf {
   if let Some(p) = std::env::var_os("LOCALAPPDATA") {
     return PathBuf::from(p);

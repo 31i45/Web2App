@@ -70,6 +70,14 @@ pub fn form_html() -> &'static str {
   $('icon').addEventListener('change', ev => {
     const f = ev.target.files[0];
     if (!f) { iconB64 = ''; return; }
+    if (f.size > 2 * 1024 * 1024) {
+      // 图标上限 2MB：base64 膨胀 ~33%，超过会显著推大产物体积
+      iconB64 = '';
+      ev.target.value = '';
+      $('status').style.color = '#ff8f8f';
+      $('status').textContent = '图标过大（>2MB），请换小图';
+      return;
+    }
     const r = new FileReader();
     r.onload = () => {
       // dataURL: data:image/png;base64,<payload>
@@ -81,16 +89,18 @@ pub fn form_html() -> &'static str {
   });
 
   $('pack').addEventListener('click', () => {
-    const url = $('url').value.trim();
+    // URL 清洗：剥除全部空白（含换行——防止伪造 IPC 的第二行图标字段）
+    const url = $('url').value.replace(/\s+/g, '');
     if (!url) { $('status').style.color = '#ff8f8f'; $('status').textContent = '请输入 URL'; return; }
     $('status').style.color = '#7ee0a3';
     $('status').textContent = '打包中…';
+    $('pack').disabled = true; // 防重复提交（set_status 回写时恢复）
     window.ipc.postMessage('pack:' + url + '\n' + iconB64);
   });
 
   // 回车提交
   $('url').addEventListener('keydown', ev => {
-    if (ev.key === 'Enter') $('pack').click();
+    if (ev.key === 'Enter' && !$('pack').disabled) $('pack').click();
   });
 </script>
 </body>
@@ -116,5 +126,17 @@ mod tests {
     assert!(h.contains(r#"id="status""#));
     // 选图走 FileReader 字节传输，不依赖文件绝对路径
     assert!(h.contains("readAsDataURL"));
+  }
+
+  #[test]
+  fn form_html_hardened_against_injection_and_oversize() {
+    let h = form_html();
+    // URL 剥除全部空白（含换行）——阻断伪造 IPC 图标行
+    assert!(h.contains("replace(/\\s+/g, '')"));
+    // 图标 2MB 上限
+    assert!(h.contains("2 * 1024 * 1024"));
+    // 打包期间按钮禁用（防重复提交）
+    assert!(h.contains("disabled = true"));
+    assert!(h.contains("disabled"));
   }
 }

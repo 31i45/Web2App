@@ -1,2 +1,6 @@
 /target/
 /.temp/
+
+# dist 只提交母版，本地产物（如测试生成的 *.exe）不入库
+/dist/*
+!/dist/Web2App.exe

@@ -430,4 +430,5 @@ mod tests {
   fn extract_field_missing_key_returns_none() {
     assert!(extract_string_field(r#"{"a":"b"}"#, "url").is_none());
   }
+
 }
