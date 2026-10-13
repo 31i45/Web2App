@@ -44,9 +44,9 @@ Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定�
 
 | 指标 | 目标 | 实测 |
 |---|---|---|
-| child 体积（用户分发的产物） | < 1 MB | ~750 KB（随工具链微漂移） |
+| child 体积（用户分发的产物） | < 1 MB | ~670 KB（随工具链微漂移） |
 | master 体积（打包器） | < 2 MB | ~1.5 MB（内嵌 child 模板） |
-| 冷启动 | < 2 s | 秒级 |
+| 冷启动 | < 2 s | 秒级（经验值，无自动化基准） |
 | 关闭残留 | 无 | 进程/WebView2 子进程全部退出 |
 | 运行副作用 | 无 | 无后台控制台；exe 目录零落盘 |
 
@@ -57,7 +57,7 @@ v2 采用三 crate workspace 结构，实现「子应用结构性不可繁殖」
 ```
 tail-core/        # 共享层：尾部协议、PNG 解码、URL 工具、致命错误呈现（零 tao/wry 依赖）
 ├── src/lib.rs    #   AppConfig / read_tail / write_tail / decode_png / resize_box / sanitize_host
-child/           # 子应用运行时（用户分发的精简产物，~750KB）
+child/           # 子应用运行时（用户分发的精简产物，~670KB）
 ├── build.rs     #   winres 编译 w2a.ico 进 .rsrc（文件图标默认值）
 ├── src/main.rs  #   读尾部配置 → 打开 WebView；无配置 → 报错（不可直接运行）
 ├── src/icon.rs  #   用户 PNG → tao 窗口图标（用 tail_core::decode_png）
@@ -125,7 +125,7 @@ v2 转向 **Windows-only** 长期商用，Linux/macOS 平台不再维护。社�
 |---|---|---|---|
 | Windows | WebView2 | Win11 预装，微软官方维护，API 稳定 | 无 |
 | macOS | WKWebView | 系统自带，Apple 维护 | wry 需额外平台依赖；图标/窗口控制 API 与 Windows 差异大 |
-| Linux | WebKitGTK | 需用户自行安装 `libwebkit2gtk-4.1` | 发行版碎片化（Ubuntu/Debian/Fedora/Arch 版本不一），无统一运行时保证 |
+| Linux | WebKitGTK | 需用户自行安装 `libwebkit2gtk-4.1-0` | 发行版碎片化（Ubuntu/Debian/Fedora/Arch 版本不一），无统一运行时保证 |
 
 Windows 是唯一「运行时开箱即用 + API 稳定」的平台。Linux 上用户可能因缺 WebKitGTK 而无法启动，macOS 上窗口/图标行为需独立适配。
 
