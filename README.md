@@ -103,7 +103,7 @@ assets/
 
 注入改写 PE .rsrc，必须在尾部追加之前完成，否则尾部会被 `EndUpdateResource` 丢弃。
 
-### 关闭确定性
+### 关闭的确定性
 
 实测（tao 0.37 + wry 0.57/WebView2）：单条 `WM_CLOSE` 路径下（Alt+F4、任务栏「关闭窗口」、`taskkill` 无 `/F`、UI 自动化），tao 的 `CloseRequested` 事件可能永不派发——消息被 WebView2 嵌套 COM 消息泵吞没，进程 30s+ 不自退。
 
@@ -115,12 +115,43 @@ v2 采用两层确定性兜底：
 
 ## 平台策略
 
-v2 转向 **Windows-only** 长期商用。Linux/macOS 平台不再维护，社区可基于 v1 自行 fork。
+v2 转向 **Windows-only** 长期商用，Linux/macOS 平台不再维护。社区可基于 v1 自行 fork 移植。
 
-原因：
-- WebView2 是 Windows 上最可靠的 WebView 后端（Win11 预装）
-- UpdateResource API 实现用户自定义文件图标，仅 Windows 有此能力
-- 商用聚焦单一平台，避免跨平台维护成本
+这一决策基于技术可行性与商业性价比的综合评估，而非偏好：
+
+### 1. WebView 后端的成熟度差异
+
+| 平台 | 后端 | 状态 | 问题 |
+|---|---|---|---|
+| Windows | WebView2 | Win11 预装，微软官方维护，API 稳定 | 无 |
+| macOS | WKWebView | 系统自带，Apple 维护 | wry 需额外平台依赖；图标/窗口控制 API 与 Windows 差异大 |
+| Linux | WebKitGTK | 需用户自行安装 `libwebkit2gtk-4.1` | 发行版碎片化（Ubuntu/Debian/Fedora/Arch 版本不一），无统一运行时保证 |
+
+Windows 是唯一「运行时开箱即用 + API 稳定」的平台。Linux 上用户可能因缺 WebKitGTK 而无法启动，macOS 上窗口/图标行为需独立适配。
+
+### 2. 单文件产物的可行性
+
+Web2App 的核心承诺是**单文件产物**——用户拿到一个 exe，双击即运行，无安装、无辅助文件。这一承诺在三平台的实现难度天差地别：
+
+- **Windows**：PE 文件 + 尾部追加配置 = 真单文件。文件图标通过 `UpdateResource` API 注入 `.rsrc` 节，产物仍是单文件。
+- **macOS**：应用必须是 `.app` bundle（目录结构，含 `Contents/MacOS/`、`Contents/Resources/`、`Info.plist`），无法单文件。自定义图标需替换 bundle 内的 `.icns` 并修改 `Info.plist`，破坏单文件承诺。
+- **Linux**：无原生单文件方案。AppImage 需 FUSE 支持且部分发行版默认禁用；`.deb`/`.rpm` 是包而非单文件；图标依赖 `.desktop` 文件 + 图标文件 + 桌面环境解析。要实现「单文件 + 自定义图标」在 Linux 上几乎无解。
+
+### 3. 构建与测试成本
+
+- **CI 矩阵膨胀**：三平台 × 三 crate workspace，构建时间与资源消耗成倍增长。
+- **行为差异**：每个平台的 WebView 对窗口生命周期、关闭消息、焦点、IME 的处理不同，关闭确定性等问题需在每个平台独立验证——tao/wry 在 Windows 上的 `WM_CLOSE` 吞没问题在 macOS/Linux 上是另一套机制。
+- **Linux 碎片化**：无法穷举所有发行版/桌面环境组合的测试，bug 报告会持续涌入而难以复现。
+
+### 4. 商业性价比
+
+- 桌面应用商用市场 Windows 占绝对多数，Linux/macOS 桌面用户占比低且对「单文件 exe」类工具需求有限。
+- 跨平台代码增加的复杂性会拖慢 Windows 端的迭代速度，反而损害主要用户的体验。
+- 聚焦单一平台可以做深做透——UpdateResource 图标注入、关闭确定性哨兵、winres 资源编译等都是 Windows 原生能力，在其他平台无法等价实现。
+
+### 结论
+
+Web2App 的核心价值（单文件、自定义图标、零依赖）在 Windows 上可以完美实现，在 Linux/macOS 上要么无法实现（单文件），要么成本极高（WebView 碎片化、构建测试矩阵）。放弃跨平台是为了把有限的精力集中在能把产品做到极致的平台上。
 
 ## 开发
 
