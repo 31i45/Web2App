@@ -1,21 +1,21 @@
-[package]
-name = "web2app"
-version = "1.0.0"
+[workspace]
+members = ["tail-core", "child", "master"]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
 edition = "2021"
-description = "Self-reproducing single-file cross-platform web-to-app packager"
 license = "MIT"
 
-[dependencies]
-# default features = os-webview + x11：Linux 后端（gtk/webkit2gtk）由 os-webview
-# 开启——曾因 default-features=false 仅启 devtools 而关闭，Linux 编译 E0433。
-wry = { version = "0.57", features = ["devtools"] }
+[workspace.dependencies]
+tail-core = { path = "tail-core" }
+wry = { version = "0.57", default-features = false, features = ["devtools"] }
 tao = "0.37"
-dunce = "1"
 png = "0.18"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 
-[target.'cfg(windows)'.build-dependencies]
-winres = "0.1"
-
+# Release 产物极致轻量：全 workspace 共享同一组优化开关。
+# panic=abort 仅作用于 release；测试走 dev profile（unwind），不受影响。
 [profile.release]
 opt-level = "z"
 lto = true

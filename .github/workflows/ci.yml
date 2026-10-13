@@ -19,14 +19,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 每次推送/PR：三平台矩阵验证（测试 + 严格 clippy + release 构建 + 10MB 红线）
+  # v2 Windows-only：winres 资源编译 / user32 MessageBox / UpdateResource
+  # 均为无条件 Windows 代码，非 Windows 目标已不构建。
   verify:
-    name: verify (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: verify (windows)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -34,101 +31,75 @@ jobs:
         with:
           components: clippy
 
-      # wry/tao 在 Linux 需要 WebKitGTK 4.1 系统库（构建期头文件）；
-      # gtk 为 tao 直接依赖（gdkwayland/gdkx11 的 .pc 均由 libgtk-3-dev 提供）
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
-
       - uses: Swatinem/rust-cache@v2
 
+      # 两阶段构建是 v2 架构固有约束：master 编译期内嵌 child.exe，
+      # 干净 target 下 cargo test 的并行调度不保证 child 先完成，必须显式先行。
+      - name: Build child (debug; test/clippy 的前提)
+        run: cargo build -p child --locked
+
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
       - name: Clippy (zero warnings, warnings as errors)
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Release build + 10MB red line
+      # build.ps1 保证顺序：child 先于 master（master 编译期内嵌 child.exe）
+      - name: Release build (child -> master -> assemble)
+        run: ./build.ps1 -SkipTests
+
+      - name: Size red lines (child < 1MB, web2app < 2MB)
         shell: bash
         run: |
-          cargo build --release --locked
-          bin="target/release/web2app"
-          if [ "$RUNNER_OS" = "Windows" ]; then bin="target/release/web2app.exe"; fi
-          size=$(wc -c < "$bin")
-          if [ "$size" -gt 10485760 ]; then
-            echo "::error::master exceeds 10MB red line ($size bytes)"
-            exit 1
-          fi
-          echo "master: $size bytes (within 10MB red line)"
+          set -euo pipefail
+          child=$(wc -c < target/release/child.exe)
+          master=$(wc -c < dist/web2app.exe)
+          echo "child:   $child bytes"
+          echo "web2app: $master bytes"
+          if [ "$child" -gt 1048576 ]; then echo "::error::child exceeds 1MB promise ($child)"; exit 1; fi
+          if [ "$master" -gt 2097152 ]; then echo "::error::web2app exceeds 2MB target ($master)"; exit 1; fi
 
-  # 发布（仅 v* 标签）：四目标矩阵构建原生二进制，经 artifact 汇总到 release job
+  # 发布（仅 v* 标签）：Windows 单目标
   build:
-    name: build (${{ matrix.target }})
+    name: build (windows)
     needs: verify
     if: startsWith(github.ref, 'refs/tags/v')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          target: ${{ matrix.target }}
-
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+          target: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build, red-line check, package
+      # --target 下 child 落在 target/<triple>/release，master/build.rs 经
+      # ../target 定位 release/child.exe —— 先显式构建 child 保证模板就位。
+      - name: Build child then workspace
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          target="${{ matrix.target }}"
-          cargo build --release --locked --target "$target"
-          ext=""
-          case "$target" in *windows*) ext=".exe";; esac
-          bin="target/${target}/release/web2app${ext}"
+          cargo build -p child --release --locked --target x86_64-pc-windows-msvc
+          cargo build --workspace --release --locked --target x86_64-pc-windows-msvc
+          bin="target/x86_64-pc-windows-msvc/release/web2app.exe"
           size=$(wc -c < "$bin")
-          if [ "$size" -gt 10485760 ]; then
-            echo "::error::${bin} exceeds 10MB red line ($size bytes)"
+          if [ "$size" -gt 2097152 ]; then
+            echo "::error::${bin} exceeds 2MB target ($size bytes)"
             exit 1
           fi
           mkdir -p dist
-          if [ -n "$ext" ]; then
-            cp "$bin" "dist/Web2App-${tag}-${target}.exe"
-          else
-            cp "$bin" Web2App
-            tar -czf "dist/Web2App-${tag}-${target}.tar.gz" Web2App
-            rm -f Web2App
-          fi
+          cp "$bin" "dist/web2app-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc.exe"
           ls -l dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.target }}
+          name: bin-windows
           path: dist/*
           if-no-files-found: error
 
-  # 汇总四平台产物 + SHA256SUMS → GitHub Release（发布物唯一来源）
+  # 汇总产物 + SHA256SUMS → GitHub Release（发布物唯一来源）
   release:
     name: publish release
     needs: build
@@ -142,13 +113,13 @@ jobs:
       - name: Download all platform binaries
         uses: actions/download-artifact@v4
         with:
+          name: bin-windows
           path: dist
-          merge-multiple: true
 
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum Web2App-* > SHA256SUMS.txt
+          sha256sum web2app-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Create GitHub Release

@@ -1,0 +1,22 @@
+[package]
+name = "master"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Web2App 打包器（内嵌 child 模板，单文件入口）"
+
+# 产物命名为 web2app.exe（产品名）。包名 master 仅作内部架构角色（打包器），
+# 不得泄漏到用户可见处——故二进制名走产品名而非包名。
+[[bin]]
+name = "web2app"
+path = "src/main.rs"
+
+[dependencies]
+tail-core = { workspace = true }
+wry = { workspace = true }
+tao = { workspace = true }
+png = { workspace = true }
+windows-sys = { workspace = true }
+
+[build-dependencies]
+winres = "0.1"

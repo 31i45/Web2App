@@ -1,6 +1,6 @@
-# Web2App 一键构建脚本
+# Web2App v2 构建脚本（两 crate workspace）
 # 用法：
-#   .\build.ps1              # 完整构建：测试 + Release 编译 + 母版装配
+#   .\build.ps1              # 完整构建：child → 测试 → master → 装配
 #   .\build.ps1 -SkipTests   # 跳过单元测试
 param(
     [switch]$SkipTests,
@@ -10,31 +10,37 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-Write-Host "== Web2App build ==" -ForegroundColor Cyan
+Write-Host "== Web2App v2 build ==" -ForegroundColor Cyan
 
-# 1) 单元测试
+# 1) 构建 child（release）— master 编译期内嵌 child.exe，必须先构建
+Write-Host "[1/4] cargo build -p child --release" -ForegroundColor Cyan
+cargo build -p child --release
+if ($LASTEXITCODE -ne 0) { throw "child build failed" }
+
+# 2) 单元测试（全 workspace：tail-core + child + master，共 50 个）
 if (-not $SkipTests) {
-    Write-Host "[1/3] cargo test" -ForegroundColor Cyan
-    cargo test --bin web2app
+    Write-Host "[2/4] cargo test --workspace" -ForegroundColor Cyan
+    cargo test --workspace
     if ($LASTEXITCODE -ne 0) { throw "tests failed" }
 } else {
-    Write-Host "[1/3] skip tests" -ForegroundColor DarkGray
+    Write-Host "[2/4] skip tests" -ForegroundColor DarkGray
 }
 
-# 2) Release 编译（GUI 子系统 + w2a 图标经 .rc 编译进 exe）
-Write-Host "[2/3] cargo build --release" -ForegroundColor Cyan
-cargo build --release
-if ($LASTEXITCODE -ne 0) { throw "build failed" }
+# 3) 构建 master（release）— build.rs 定位 child.exe 并内嵌为 CHILD_TEMPLATE
+Write-Host "[3/4] cargo build -p master --release" -ForegroundColor Cyan
+cargo build -p master --release
+if ($LASTEXITCODE -ne 0) { throw "master build failed" }
 
-# 3) 母版装配
-Write-Host "[3/3] assemble master" -ForegroundColor Cyan
+# 4) 装配产物到 dist/
+Write-Host "[4/4] assemble dist" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$master = Join-Path $OutDir "Web2App.exe"
-Copy-Item "target\release\web2app.exe" $master -Force
 
-$size = (Get-Item $master).Length
-Write-Host ("master: {0} ({1:N0} KB)" -f $master, ($size / 1KB))
-if ($size -gt 10MB) { Write-Host "WARN: exceeds 10MB limit!" -ForegroundColor Red }
+$artifact = Join-Path $OutDir "web2app.exe"
+Copy-Item "target\release\web2app.exe" $artifact -Force
+
+$size = (Get-Item $artifact).Length
+Write-Host ("web2app: {0} ({1:N0} KB)" -f $artifact, ($size / 1KB))
+
 Write-Host ""
-Write-Host "usage: run Web2App.exe -> input URL (+ optional icon) -> click pack" -ForegroundColor Green
-Write-Host "       product --master -> reopen packer (self-reproduction)" -ForegroundColor Green
+Write-Host "usage: run web2app.exe -> input URL (+ optional icon) -> click pack" -ForegroundColor Green
+Write-Host "       product exe opens URL in WebView2 window with user icon" -ForegroundColor Green

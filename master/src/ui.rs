@@ -1,10 +1,16 @@
-//! ui.rs — 母版启动界面（内嵌 HTML，零外部资源文件）。
+//! master/src/ui.rs — 母版启动界面（内嵌 HTML，零外部资源文件）。
 //!
 //! 验收红线：界面仅 URL 输入框、图标选择、打包按钮三个核心元素。
-//! 图标选图用浏览器原生 input[type=file]+FileReader（W3C 标准，
-//! 三平台同一实现），图片字节经 base64 由 IPC 传给原生，无需绝对路径。
+//! 图标选图用浏览器原生 input[type=file]+FileReader（W3C 标准），
+//! 图片字节经 base64 由 IPC 传给原生，无需绝对路径。
 
-use crate::builder;
+/// 母版 WebView 数据目录（固定名，不打扰任何 exe 目录）。
+pub fn master_data_dir() -> std::path::PathBuf {
+  let base = std::env::var_os("LOCALAPPDATA")
+    .map(std::path::PathBuf::from)
+    .unwrap_or_else(std::env::temp_dir);
+  base.join("Web2App").join("master")
+}
 
 /// 母版表单页 HTML（纯静态）。全部样式内联，无网络请求、无外部依赖。
 pub fn form_html() -> &'static str {
@@ -51,7 +57,7 @@ pub fn form_html() -> &'static str {
 <body>
 <div class="card">
   <h1>Web2App 打包器</h1>
-  <p class="sub">输入网页地址，生成单文件桌面应用（产物自带打包能力）</p>
+  <p class="sub">输入网页地址，生成单文件桌面应用</p>
 
   <label for="url">网页 URL</label>
   <input type="text" id="url" placeholder="https://example.com" autofocus>
@@ -107,10 +113,9 @@ pub fn form_html() -> &'static str {
 </html>"#
 }
 
-/// 从表单 URL 推导产物文件名：安全 host + 平台可执行后缀（Windows .exe / Unix 无扩展）。
+/// 从表单 URL 推导产物文件名：安全 host + .exe（Windows-only）。
 pub fn product_filename(url: &str) -> String {
-  let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
-  format!("{}{}", builder::sanitize_host(url), ext)
+  format!("{}.exe", tail_core::sanitize_host(url))
 }
 
 /// 解析母版表单的 IPC 消息：`pack:<url>\n<base64 图标>`（图标行可缺失）。
@@ -124,7 +129,7 @@ pub fn parse_pack_message(body: &str) -> Option<(String, Option<Vec<u8>>)> {
   let mut lines = rest.splitn(2, '\n');
   let url = lines.next().unwrap_or("").to_string();
   let b64 = lines.next().unwrap_or("");
-  let icon = if b64.is_empty() { None } else { crate::tail::base64_decode(b64) };
+  let icon = if b64.is_empty() { None } else { tail_core::base64_decode(b64) };
   Some((url, icon))
 }
 
@@ -157,7 +162,7 @@ mod tests {
 
   #[test]
   fn parse_pack_message_with_icon() {
-    let msg = format!("pack:https://example.com\n{}", crate::tail::base64_encode(b"\x89PNG-icon"));
+    let msg = format!("pack:https://example.com\n{}", tail_core::base64_encode(b"\x89PNG-icon"));
     let (url, icon) = parse_pack_message(&msg).unwrap();
     assert_eq!(url, "https://example.com");
     assert_eq!(icon.as_deref(), Some(b"\x89PNG-icon".as_slice()));

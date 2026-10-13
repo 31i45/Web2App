@@ -1,16 +1,21 @@
-//! tail.rs — 自繁殖协议：尾部追加式单文件配置。
+//! tail-core — Web2App 共享层。
 //!
-//! 「一个程序就是一份配置」：URL 与可选图标 PNG 追加在可执行文件尾部，
-//! 母版=无尾部配置的裸程序，产物=母版+尾部配置。产物本身就是新的母版，
-//! 可再次追加新配置 → 生成即母版，自繁殖闭环。
+//! 三方共用：尾部协议（child 读取运行配置 / master 写入打包配置）、
+//! PNG 解码与缩放（child 把用户图与 w2a 默认图转为像素，供 tao Icon 用）、
+//! URL 工具（master 产物文件名与 child 数据目录共用 sanitize_host 单点持有）、
+//! 致命错误呈现（Windows GUI 子系统下 stderr 无人看，必须 MessageBox）。
 //!
-//! 尾部格式：`<payload JSON> <MAGIC:16> <payload_len:u64 LE>`。
-//! 长度字段放在 MAGIC 之后，使「自末尾倒数 24 字节」即可定位，
-//! 天然支持「覆盖旧配置再追加」（剥离 = 总长 - 24 - payload_len）。
+//! 设计红线：零 tao/wry 依赖。本 crate 仅为「数据层」与「系统错误呈现」，
+//! 任何引用窗口/WebView 类的代码不得引入此处（避免 child 产物体积膨胀）。
+//! 窗口图标转换在 child/icon.rs（依赖 tao::window::Icon），此处只到像素字节为止。
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+// ============================================================================
+// 尾部协议：尾部追加式单文件配置
+// ============================================================================
 
 /// 尾部魔数。选 16 字节保证足够独特、极低误撞率。
 pub const TAIL_MAGIC: &[u8; 16] = b"__WEB2APP_TAIL__";
@@ -22,7 +27,7 @@ pub struct AppConfig {
   pub url: String,
   /// 窗口标题（默认取 URL host）。
   pub title: String,
-  /// 用户图标 PNG 原始字节（可选；None = 继承母版 w2a 文件图标）。
+  /// 用户图标 PNG 原始字节（可选；None = 继承 w2a 默认窗口图标）。
   pub icon_png: Option<Vec<u8>>,
 }
 
@@ -63,7 +68,7 @@ impl AppConfig {
   }
 }
 
-/// 从自身可执行文件读取尾部配置。无尾部 → None（= 母版模式）。
+/// 从自身可执行文件读取尾部配置。无尾部 → None（= 母版 / 运行时组件模式）。
 pub fn read_tail() -> io::Result<Option<AppConfig>> {
   let exe = current_exe()?;
   read_tail_from(&exe)
@@ -126,15 +131,40 @@ pub fn strip_tail(bytes: &[u8]) -> &[u8] {
   }
 }
 
-/// 当前可执行文件路径（Windows 下自动去除 UNC `\\?\` 前缀）。
+/// 当前可执行文件路径（Windows 下手动剥离 `\\?\` verbatim 前缀，零依赖替代 dunce）。
+///
+/// 仅 `\\?\C:\...` 驱动器号形态被剥离为 `C:\...`；`\\?\UNC\server\share`
+/// 转写为 `\\server\share`。无需 canonicalize：调用方（read_tail 自读、
+/// master 的 dir_of_current_exe 写出目录）都不要求符号链接解析。
 pub fn current_exe() -> io::Result<PathBuf> {
   let p = std::env::current_exe()?;
-  #[cfg(target_os = "windows")]
-  let p = dunce::canonicalize(&p).unwrap_or(p);
-  Ok(p)
+  Ok(strip_verbatim_prefix(p))
 }
 
-// ---------- 手写 JSON 工具（零依赖红线） ----------
+/// Windows verbatim `\\?\` 前缀剥离。
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+  let s = match p.to_str() {
+    Some(s) => s,
+    None => return p, // 非 UTF-8 路径，原样返回（Windows 上罕见但保守）
+  };
+  if let Some(rest) = s.strip_prefix(r"\\?\") {
+    // 驱动器号形态：\\?\C:\foo → C:\foo
+    let b = rest.as_bytes();
+    if b.len() >= 2 && b[1] == b':' {
+      return PathBuf::from(rest);
+    }
+    // UNC 形态：\\?\UNC\server\share → \\server\share
+    if let Some(unc_rest) = rest.strip_prefix("UNC\\") {
+      return PathBuf::from(format!(r"\\{unc_rest}"));
+    }
+  }
+  p
+}
+
+// ============================================================================
+// 手写 JSON 工具（零 serde 红线）
+// ============================================================================
+
 /// JSON 字符串转义。
 fn json_escape(s: &str) -> String {
   let mut out = String::with_capacity(s.len() + 2);
@@ -225,7 +255,9 @@ fn unescape(s: &str) -> String {
   out
 }
 
-// ---------- base64（图标字节与 JSON 的互转，纯手写零依赖） ----------
+// ============================================================================
+// base64（图标字节与 JSON 的互转，纯手写零依赖）
+// ============================================================================
 
 /// 标准 base64 编码（带 padding）。
 pub fn base64_encode(data: &[u8]) -> String {
@@ -273,9 +305,231 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
   Some(out)
 }
 
+// ============================================================================
+// PNG 解码与 box 缩放（窗口图标转换的纯数据层；tao::Icon 在 child/icon.rs）
+// ============================================================================
+
+/// PNG 像素总量上限（解压炸弹防御）：4096×4096 = 16.7M 像素 ≈ 67MB RGBA。
+/// 图标场景远用不到；超限直接拒绝，避免「小文件大画布」拖垮内存。
+const MAX_PIXELS: u64 = 4096 * 4096;
+
+/// 尺寸是否在安全限内（含 u32 乘法溢出防御）。
+fn dims_within_limit(w: u32, h: u32) -> bool {
+  u64::from(w) * u64::from(h) <= MAX_PIXELS
+}
+
+/// PNG → RGBA8（仅 RGB/RGBA 8bit，其余返回 None；尺寸超限返回 None）。
+pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+  let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+  let mut reader = decoder.read_info().ok()?;
+  // 炸弹防御：read_info 已解析 IHDR，在分配像素缓冲前拒绝超限画布
+  if !dims_within_limit(reader.info().width, reader.info().height) {
+    return None;
+  }
+  let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+  let info = reader.next_frame(&mut buf).ok()?;
+  let rgba = match info.color_type {
+    png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+    png::ColorType::Rgb => {
+      let n = info.buffer_size();
+      let mut out = Vec::with_capacity(n / 3 * 4);
+      for px in buf[..n].as_chunks::<3>().0 {
+        out.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+      }
+      out
+    }
+    _ => return None,
+  };
+  Some((info.width, info.height, rgba))
+}
+
+/// box filter 缩放（目标像素 = 源对应矩形区域的平均值），任意比例通用。
+pub fn resize_box(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+  if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+    return Vec::new();
+  }
+  if dw == sw && dh == sh {
+    return src.to_vec();
+  }
+  let mut out = Vec::with_capacity((dw * dh * 4) as usize);
+  for y in 0..dh {
+    let sy0 = y * sh / dh;
+    let sy1 = ((y + 1) * sh / dh).max(sy0 + 1);
+    for x in 0..dw {
+      let sx0 = x * sw / dw;
+      let sx1 = ((x + 1) * sw / dw).max(sx0 + 1);
+      let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+      let mut n = 0u32;
+      for sy in sy0..sy1 {
+        for sx in sx0..sx1 {
+          let p = ((sy * sw + sx) * 4) as usize;
+          r += u32::from(src[p]);
+          g += u32::from(src[p + 1]);
+          b += u32::from(src[p + 2]);
+          a += u32::from(src[p + 3]);
+          n += 1;
+        }
+      }
+      out.extend_from_slice(&[(r / n) as u8, (g / n) as u8, (b / n) as u8, (a / n) as u8]);
+    }
+  }
+  out
+}
+
+// ============================================================================
+// URL 工具（master 产物文件名 + child 数据目录共用 sanitize_host 单点持有）
+// ============================================================================
+
+/// 从 URL 提取默认应用标题（host 去协议前缀）。
+pub fn default_title(url: &str) -> String {
+  let s = url
+    .trim()
+    .trim_start_matches("https://")
+    .trim_start_matches("http://");
+  let host = s.split(['/', '?', '#']).next().unwrap_or("Web2App");
+  if host.is_empty() {
+    "Web2App".to_string()
+  } else {
+    host.to_string()
+  }
+}
+
+/// URL → host → 安全字符序列（单点持有：master 产物文件名与 child 数据目录共用）。
+/// 非 `[A-Za-z0-9.-]` 字符替换为下划线。
+/// 恰为 `..` / `.` 的段回落默认名：此类 host（仅手工伪造的尾部可产生）
+/// 会令数据目录上移或指向当前目录，构成路径遍历面。
+pub fn sanitize_host(url: &str) -> String {
+  let s: String = default_title(url)
+    .chars()
+    .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+    .collect();
+  if s == ".." || s == "." {
+    "Web2App".to_string()
+  } else {
+    s
+  }
+}
+
+// ============================================================================
+// 致命错误呈现（Windows-only，无 Unix 分支）
+// ============================================================================
+
+/// 致命错误的用户可见呈现后退出（返回 `!`）。
+///
+/// 动机：release 为 Windows GUI 子系统且 `panic = "abort"`，`eprintln` 无人看见、
+/// panic 无输出——错误必须以用户可感知的方式呈现，否则双击即"静默死亡"。
+/// Windows 用 MessageBoxW（`extern` 直接声明，零新依赖）。
+pub fn show_fatal_and_exit(msg: &str) -> ! {
+  #[link(name = "user32")]
+  extern "system" {
+    fn MessageBoxW(
+      hwnd: *mut core::ffi::c_void,
+      text: *const u16,
+      caption: *const u16,
+      utype: u32,
+    ) -> i32;
+  }
+  const MB_OK: u32 = 0x0;
+  const MB_ICONERROR: u32 = 0x10;
+  let text: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+  let caption: Vec<u16> = "Web2App".encode_utf16().chain(std::iter::once(0)).collect();
+  unsafe {
+    MessageBoxW(
+      std::ptr::null_mut(),
+      text.as_ptr(),
+      caption.as_ptr(),
+      MB_OK | MB_ICONERROR,
+    );
+  }
+  std::process::exit(1)
+}
+
+/// 关闭看门狗：300ms 后若进程仍存活，以退出码 0 结束进程。
+///
+/// 与 tao 事件处理里的 `ControlFlow::Exit` 配对使用。实测（tao 0.37 +
+/// wry 0.57/WebView2）：单条 WM_CLOSE 路径下（Alt+F4、任务栏「关闭窗口」、
+/// taskkill 无 /F、UI 自动化），即使投递 WM_QUIT 也会被 Chromium 嵌套 COM
+/// 消息泵在 tao 外层 GetMessage 之前吞掉——进程要等下一条消息才退出；
+/// 鼠标点 X 因伴随消息风暴通常无感，但「关闭即退出」不能依赖运气。
+///
+/// 看门狗在独立线程睡眠，不参与消息泵竞争，给出 300ms 的确定退出上限。
+/// 正常路径几乎总先于它结束（tao run() 末尾自身即 process::exit，本就不做
+/// 栈展开），线程随进程消失，零副作用；仅在框架卡死时兜底。WebView2 按
+/// 浏览器进程被杀的常态设计，硬退出不损坏数据目录。
+///
+/// 幂等：多次调用仅多 spawn 无害线程，exit 先到先得。配套：
+/// [`arm_close_watchdog`]——在 WNDPROC 层面保证本函数必然被武装。
+pub fn quit_watchdog() {
+  std::thread::spawn(|| {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::process::exit(0);
+  });
+}
+
+/// 原窗口过程（tao 的），挂接哨兵时保存。单窗口进程故全局单值。
+static PREV_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// 在窗口上安装关闭哨兵：替换窗口过程，捕获 WM_CLOSE 并武装 [`quit_watchdog()`]。
+///
+/// 动机（实测 tao 0.37 + wry 0.57/WebView2）：单条 WM_CLOSE 路径下
+/// （Process.CloseMainWindow、Alt+F4、任务栏「关闭窗口」、taskkill 无 /F），
+/// tao 的 CloseRequested 事件可能**永不派发**——消息被 WebView2 嵌套 COM
+/// 消息泵吞没，进程 30s+ 不自退（本仓库 e2e 实测复现）。事件层无法自救，
+/// 必须在消息进入框架之前拦截。
+///
+/// 本函数在 WNDPROC 层面捕获 WM_CLOSE——先于一切框架事件派发，不受消息泵
+/// 吞没影响——收到即武装看门狗（300ms 确定退出），随后无条件
+/// `CallWindowProcW` 透传给 tao 原过程，正常事件链完全不受影响。
+///
+/// 调用约束：
+/// - 必须在**创建 WebView 之前**调用：wry 挂接其 subclass 时以当前 WNDPROC
+///   为链尾，先挂哨兵可保证 wry 的 WM_SIZE/WM_SETFOCUS 等处理仍在链上。
+/// - 须在窗口所属线程调用（child/master 均在主线程窗口创建后立即调用）。
+/// - 面向单窗口进程设计（PREV_WNDPROC 为全局单值）。
+///
+/// 无竞态：挂接发生在事件循环启动前、hwnd 尚未暴露给任何其他线程，
+/// 消息不可能在 store 原过程之前到达哨兵 proc。
+pub fn arm_close_watchdog(hwnd: isize) {
+  #[link(name = "user32")]
+  extern "system" {
+    fn SetWindowLongPtrW(hwnd: isize, index: i32, new_value: isize) -> isize;
+    fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+  }
+  const GWLP_WNDPROC: i32 = -4;
+  const WM_CLOSE: u32 = 0x0010;
+
+  unsafe extern "system" fn close_watch_proc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+  ) -> isize {
+    if msg == WM_CLOSE {
+      quit_watchdog();
+    }
+    let prev = PREV_WNDPROC.load(std::sync::atomic::Ordering::Acquire);
+    CallWindowProcW(prev, hwnd, msg, wparam, lparam)
+  }
+
+  // SAFETY: hwnd 为调用方持有的有效窗口句柄。SetWindowLongPtrW 原子换入
+  // 哨兵过程并返回原过程；失败返回 0 时不保存（哨兵永不生效，行为等同
+  // 未安装，退化为仅 tao handler 路径的看门狗）。
+  let prev =
+    unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, close_watch_proc as *const () as isize) };
+  if prev != 0 {
+    PREV_WNDPROC.store(prev, std::sync::atomic::Ordering::Release);
+  }
+}
+
+// ============================================================================
+// 测试（30 个：tail 协议 20 + PNG/缩放 6 + URL 工具 4）
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  // ---------- tail.rs 测试（20 个） ----------
 
   fn sample() -> AppConfig {
     AppConfig::new("https://example.com/app".into(), "My App".into(), None)
@@ -536,4 +790,125 @@ mod tests {
     }
   }
 
+  // ---------- icon.rs PNG/缩放 测试（6 个） ----------
+
+  /// 测试用 PNG 构造器（仅测试需要编码能力，cfg 收敛避免 dead_code）。
+  fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+      let mut enc = png::Encoder::new(&mut out, w, h);
+      enc.set_color(png::ColorType::Rgba);
+      enc.set_depth(png::BitDepth::Eight);
+      let mut writer = enc.write_header().ok()?;
+      writer.write_image_data(rgba).ok()?;
+    }
+    Some(out)
+  }
+
+  fn solid_rgba(w: u32, h: u32, c: [u8; 4]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for _ in 0..w * h {
+      v.extend_from_slice(&c);
+    }
+    v
+  }
+
+  #[test]
+  fn png_roundtrip() {
+    let rgba = solid_rgba(8, 8, [1, 2, 3, 4]);
+    let png = encode_png(8, 8, &rgba).unwrap();
+    let (w, h, out) = decode_png(&png).unwrap();
+    assert_eq!((w, h), (8, 8));
+    assert_eq!(out, rgba);
+  }
+
+  #[test]
+  fn decode_png_rgb_expands_to_rgba() {
+    // RGB PNG → RGBA（补 0xFF alpha）
+    let mut out = Vec::new();
+    {
+      let mut enc = png::Encoder::new(&mut out, 4u32, 1u32);
+      enc.set_color(png::ColorType::Rgb);
+      enc.set_depth(png::BitDepth::Eight);
+      let mut writer = enc.write_header().unwrap();
+      writer.write_image_data(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]).unwrap();
+    }
+    let (w, h, rgba) = decode_png(&out).unwrap();
+    assert_eq!((w, h), (4, 1));
+    assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255]);
+  }
+
+  #[test]
+  fn decode_png_rejects_garbage() {
+    assert!(decode_png(b"not a png").is_none());
+    assert!(decode_png(&[]).is_none());
+  }
+
+  #[test]
+  fn resize_box_downscale_averages() {
+    // 2x2 四色 → 1x1：各通道取平均（127.5 → 127 整除）
+    let src = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
+    let out = resize_box(&src, 2, 2, 1, 1);
+    assert_eq!(out, vec![127, 127, 127, 255]);
+  }
+
+  #[test]
+  fn resize_box_identity() {
+    let src = solid_rgba(4, 4, [7, 8, 9, 10]);
+    assert_eq!(resize_box(&src, 4, 4, 4, 4), src);
+  }
+
+  #[test]
+  fn dims_within_limit_rejects_bomb() {
+    // 正常图标尺寸
+    assert!(dims_within_limit(256, 256));
+    assert!(dims_within_limit(4096, 4096)); // 恰好等于上限
+    // 超限（炸弹画布）：5000×5000 = 25M 像素
+    assert!(!dims_within_limit(5000, 5000));
+    assert!(!dims_within_limit(30000, 30000));
+    // 极端长宽比：u32 乘法溢出防御
+    assert!(!dims_within_limit(u32::MAX, u32::MAX));
+    assert!(!dims_within_limit(u32::MAX, 2));
+    // 1×u32::MAX 不溢出 u64 但超限
+    assert!(!dims_within_limit(1, u32::MAX));
+    // 零尺寸：0 像素 ≤ 上限（后续 window_icon 另行拒绝）
+    assert!(dims_within_limit(0, 0));
+  }
+
+  // ---------- builder.rs URL 工具 测试（4 个） ----------
+
+  #[test]
+  fn default_title_extracts_host() {
+    assert_eq!(default_title("https://example.com/path?q=1"), "example.com");
+    assert_eq!(default_title("http://a.b.org"), "a.b.org");
+    assert_eq!(default_title("https://example.com/"), "example.com");
+  }
+
+  #[test]
+  fn default_title_fallback() {
+    assert_eq!(default_title("https:///x"), "Web2App");
+    assert_eq!(default_title(""), "Web2App");
+  }
+
+  #[test]
+  fn sanitize_host_rules() {
+    assert_eq!(sanitize_host("https://example.com/x?q=1"), "example.com");
+    assert_eq!(sanitize_host("https://a-b.c.org"), "a-b.c.org");
+    // 非 ASCII / 非法字符 → 下划线（逐字符替换，「中文站」→ 3 个下划线）
+    assert_eq!(sanitize_host("https://中文站.com"), "___.com");
+    assert_eq!(sanitize_host("https://a_b~c.com"), "a_b_c.com");
+    // 兜底：空 URL → 默认标题
+    assert_eq!(sanitize_host(""), "Web2App");
+  }
+
+  #[test]
+  fn sanitize_host_rejects_dot_path_components() {
+    // 路径组件安全：host 恰为 .. / . 时会令数据目录上移或指向当前目录
+    // （手工构造的尾部配置可触发），必须回落默认名而非原样输出。
+    assert_eq!(sanitize_host("https://.."), "Web2App");
+    assert_eq!(sanitize_host("https://."), "Web2App");
+    // 恰好是两个点以外的点形态不构成路径遍历（a..b / ... 均为普通目录名）
+    assert_eq!(sanitize_host("https://a..b"), "a..b");
+    assert_eq!(sanitize_host("https://...com"), "...com");
+  }
 }

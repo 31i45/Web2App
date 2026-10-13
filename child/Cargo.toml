@@ -1,0 +1,17 @@
+[package]
+name = "child"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Web2App 子应用运行时（用户分发的精简单文件产物）"
+
+[dependencies]
+tail-core = { workspace = true }
+wry = { workspace = true }
+tao = { workspace = true }
+
+[dev-dependencies]
+png = { workspace = true }
+
+[build-dependencies]
+winres = "0.1"

@@ -1,0 +1,9 @@
+[package]
+name = "tail-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Web2App 共享层：尾部协议、URL 工具、PNG 解码与致命错误呈现"
+
+[dependencies]
+png = { workspace = true }

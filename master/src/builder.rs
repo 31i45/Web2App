@@ -1,13 +1,10 @@
-//! builder.rs — 打包核心引擎。
+//! master/src/builder.rs — 打包核心引擎。
 //!
-//! 唯一职责：`复制母版自身 → 追加尾部配置（含可选图标）`。
-//! 无编译器调用、无临时目录、无平台分支、零 PE 手术。
-//!
-//! 自繁殖机制：产物 = 母版 + 尾部配置，产物含全部母版能力，可继续繁殖。
-//! 图标策略：用户 PNG 内嵌尾部配置（产物运行时设为窗口图标）；
-//! 不选图 → 尾部无 icon 字段，产物字节级继承母版（含 w2a 文件图标）。
+//! 唯一职责：`复制 child 模板 → 注入用户图标（UpdateResource）→ 追加尾部配置 → 可选签名`。
+//! child 模板编译期内嵌（CHILD_TEMPLATE），无 self_exe 读取，无自繁殖能力——
+//! child crate 不含打包器代码，产物（child + 尾部）也无法调用 pack。
 
-use crate::tail::{self, AppConfig};
+use tail_core::{self, AppConfig};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -21,35 +18,9 @@ pub struct BuildOutput {
   pub size: u64,
 }
 
-/// 从 URL 提取默认应用标题（host 去协议前缀）。
-pub fn default_title(url: &str) -> String {
-  let s = url
-    .trim()
-    .trim_start_matches("https://")
-    .trim_start_matches("http://");
-  let host = s.split(['/', '?', '#']).next().unwrap_or("Web2App");
-  if host.is_empty() {
-    "Web2App".to_string()
-  } else {
-    host.to_string()
-  }
-}
-
-/// URL → host → 安全字符序列（单点持有：ui 产物文件名与 webview 数据目录共用）。
-/// 非 `[A-Za-z0-9.-]` 字符替换为下划线。
-/// 恰为 `..` / `.` 的段回落默认名：此类 host（仅手工伪造的尾部可产生）
-/// 会令数据目录上移或指向当前目录，构成路径遍历面。
-pub fn sanitize_host(url: &str) -> String {
-  let s: String = default_title(url)
-    .chars()
-    .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
-    .collect();
-  if s == ".." || s == "." {
-    "Web2App".to_string()
-  } else {
-    s
-  }
-}
+/// 编译期内嵌的 child 模板（由 master/build.rs 通过 CHILD_BIN_PATH 指向）。
+/// child.exe 先于 master 构建（见 build.ps1），build.rs 拷贝至 OUT_DIR/child.bin。
+pub const CHILD_TEMPLATE: &[u8] = include_bytes!(env!("CHILD_BIN_PATH"));
 
 /// 校验 URL 合法性（scheme http/https）。
 pub fn validate_url(url: &str) -> Result<(), String> {
@@ -74,36 +45,45 @@ pub fn validate_url(url: &str) -> Result<(), String> {
   Ok(())
 }
 
-/// 主流程：把「当前运行的母版」复制为产物并追加尾部配置。
+/// 主流程：把内嵌 child 模板复制为产物，注入用户图标，追加尾部配置，可选签名。
 ///
-/// - `out_path`：产物输出路径
-/// - `url`：目标网页
-/// - `icon_png`：用户选择的图标 PNG 字节（可选，内嵌尾部配置；
-///   None → 尾部无 icon 字段，产物继承母版图标）
+/// 打包顺序（CRITICAL — 防止尾部丢失）：
+/// 1. 写 CHILD_TEMPLATE → tmp_out
+/// 2. if icon_png Some: inject_file_icon(tmp_out) — 非阻塞（失败 child 保留 w2a 文件图标）
+/// 3. write_tail(tmp_out, config) [config 携带 icon_png 供运行时窗口图标]
+/// 4. mkdir parent + rename tmp → out（回退 copy+delete）
+/// 5. maybe_sign(out) [非阻塞]
+/// 6. return BuildOutput
+///
+/// 注入图标改写 PE .rsrc；必须在追加尾部之前完成，否则尾部会被 EndUpdateResource 丢弃。
 pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result<BuildOutput> {
   validate_url(url).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-  let title = default_title(url);
-  let self_exe = tail::current_exe()?;
-  let product = fs::read(&self_exe)?;
-
-  // 剥离母版自身可能存在的尾部配置（产物从裸母版出发，覆盖旧配置）
-  let base = tail::strip_tail(&product);
-  let product = base.to_vec();
-
-  let config = AppConfig::new(url.to_string(), title, icon_png);
+  let title = tail_core::default_title(url);
   let tmp_out = out_path.with_extension("tmp.pack");
 
   // 组装与落盘；任一步失败都保证临时文件被清理（不留残渣）
   let built = (|| -> io::Result<u64> {
-    fs::write(&tmp_out, &product)?;
-    let size = tail::write_tail(&tmp_out, &config)?;
+    // 1) 写 child 模板到临时文件
+    fs::write(&tmp_out, CHILD_TEMPLATE)?;
+
+    // 2) 注入用户图标到 .rsrc（非阻塞：失败仅警告，child 保留 w2a 默认文件图标）
+    if let Some(ref png) = icon_png {
+      if let Err(e) = crate::winicon::inject_file_icon(&tmp_out, png) {
+        eprintln!("图标注入失败（非阻塞，用默认 w2a 图标）：{e}");
+      }
+    }
+
+    // 3) 追加尾部配置（config 携带 icon_png 供运行时窗口图标）
+    let config = AppConfig::new(url.to_string(), title, icon_png);
+    let size = tail_core::write_tail(&tmp_out, &config)?;
+
+    // 4) 原子落盘：先写临时文件再 rename，避免半写产物。
+    // rename 失败常见原因：目标被占用（Windows 文件锁，如旧产物正在运行）、
+    // 跨盘移动；回退 copy+delete。
     if let Some(dir) = out_path.parent() {
       fs::create_dir_all(dir)?;
     }
-    // 原子落盘：先写临时文件再 rename，避免半写产物。
-    // rename 失败常见原因：目标被占用（Windows 文件锁，如旧产物正在运行）、
-    // 跨盘移动；回退 copy+delete。
     match fs::rename(&tmp_out, out_path) {
       Ok(_) => {}
       Err(_) => {
@@ -115,7 +95,13 @@ pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result
   })();
 
   match built {
-    Ok(size) => Ok(BuildOutput { exe: out_path.to_path_buf(), size }),
+    Ok(size) => {
+      // 5) 可选签名（非阻塞）
+      if let Err(e) = crate::sign::maybe_sign(out_path) {
+        eprintln!("签名失败（非阻塞）：{e}");
+      }
+      Ok(BuildOutput { exe: out_path.to_path_buf(), size })
+    }
     Err(e) => {
       let _ = fs::remove_file(&tmp_out);
       Err(e)
@@ -126,19 +112,6 @@ pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn default_title_extracts_host() {
-    assert_eq!(default_title("https://example.com/path?q=1"), "example.com");
-    assert_eq!(default_title("http://a.b.org"), "a.b.org");
-    assert_eq!(default_title("https://example.com/"), "example.com");
-  }
-
-  #[test]
-  fn default_title_fallback() {
-    assert_eq!(default_title("https:///x"), "Web2App");
-    assert_eq!(default_title(""), "Web2App");
-  }
 
   #[test]
   fn validate_url_rules() {
@@ -152,65 +125,37 @@ mod tests {
   }
 
   #[test]
-  fn sanitize_host_rules() {
-    assert_eq!(sanitize_host("https://example.com/x?q=1"), "example.com");
-    assert_eq!(sanitize_host("https://a-b.c.org"), "a-b.c.org");
-    // 非 ASCII / 非法字符 → 下划线（逐字符替换，「中文站」→ 3 个下划线）
-    assert_eq!(sanitize_host("https://中文站.com"), "___.com");
-    assert_eq!(sanitize_host("https://a_b~c.com"), "a_b_c.com");
-    // 兜底：空 URL → 默认标题
-    assert_eq!(sanitize_host(""), "Web2App");
-  }
-
-  #[test]
-  fn sanitize_host_rejects_dot_path_components() {
-    // 路径组件安全：host 恰为 .. / . 时会令数据目录上移或指向当前目录
-    // （手工构造的尾部配置可触发），必须回落默认名而非原样输出。
-    assert_eq!(sanitize_host("https://.."), "Web2App");
-    assert_eq!(sanitize_host("https://."), "Web2App");
-    // 恰好是两个点以外的点形态不构成路径遍历（a..b / ... 均为普通目录名）
-    assert_eq!(sanitize_host("https://a..b"), "a..b");
-    assert_eq!(sanitize_host("https://...com"), "...com");
-  }
-
-  #[test]
   fn pack_produces_reproducible_tail() {
-    // 以临时文件模拟母版（非真实 exe 亦可：tail 协议与 PE 无关）
+    // 以临时文件模拟：CHILD_TEMPLATE + tail 协议与 PE 无关
     let dir = std::env::temp_dir().join("web2app_builder_tests");
     fs::create_dir_all(&dir).unwrap();
-    let master = dir.join("master.bin");
-    fs::write(&master, b"FAKE_MASTER_EXE_BODY").unwrap();
-
     let out = dir.join("product.bin");
 
-    // 直接复用 pack 内核逻辑（不经 self_exe）：手动构造
-    let product_body = tail::strip_tail(&fs::read(&master).unwrap()).to_vec();
+    let product_body = tail_core::strip_tail(CHILD_TEMPLATE).to_vec();
     let cfg = AppConfig::new("https://example.com".into(), "example.com".into(), None);
     fs::write(&out, &product_body).unwrap();
-    tail::write_tail(&out, &cfg).unwrap();
+    tail_core::write_tail(&out, &cfg).unwrap();
 
-    let read_back = tail::read_tail_from(&out).unwrap().unwrap();
+    let read_back = tail_core::read_tail_from(&out).unwrap().unwrap();
     assert_eq!(read_back.url, "https://example.com");
     assert_eq!(read_back.title, "example.com");
   }
 
   #[test]
-  fn pack_real_self_exe_roundtrip() {
-    // 真实调用 pack 主路径：self_exe = 本测试二进制自身
-    let dir = std::env::temp_dir().join("web2app_pack_real");
+  fn pack_produces_child_template_base() {
+    // 产物裸主体 = CHILD_TEMPLATE（验证「从模板复制，非自身繁殖」）
+    let dir = std::env::temp_dir().join("web2app_pack_template");
     fs::create_dir_all(&dir).unwrap();
     let out = dir.join("product.bin");
 
     let result = pack(&out, "https://example.com", None).unwrap();
 
-    // 产物裸主体 = 自身字节（逐字节一致，验证「复制自身」）
-    let self_bytes = fs::read(tail::current_exe().unwrap()).unwrap();
-    let expected_base = tail::strip_tail(&self_bytes);
     let raw = fs::read(&out).unwrap();
+    let expected_base = tail_core::strip_tail(CHILD_TEMPLATE);
     assert_eq!(&raw[..expected_base.len()], expected_base);
 
     // 尾部配置可读回
-    let cfg = tail::read_tail_from(&out).unwrap().unwrap();
+    let cfg = tail_core::read_tail_from(&out).unwrap().unwrap();
     assert_eq!(cfg.url, "https://example.com");
     assert_eq!(cfg.title, "example.com");
     assert_eq!(result.size, raw.len() as u64);
@@ -228,17 +173,17 @@ mod tests {
     let png: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37)).collect(); // 任意字节即可（协议层不管内容）
     let out = dir.join("product.bin");
     pack(&out, "https://example.com", Some(png.clone())).unwrap();
-    let cfg = tail::read_tail_from(&out).unwrap().unwrap();
+    let cfg = tail_core::read_tail_from(&out).unwrap().unwrap();
     assert_eq!(cfg.url, "https://example.com");
     assert_eq!(cfg.icon_png.as_deref(), Some(png.as_slice()));
 
     // 不选图：icon 字段缺失 → None
     let out2 = dir.join("product2.bin");
     pack(&out2, "https://example.com", None).unwrap();
-    let cfg2 = tail::read_tail_from(&out2).unwrap().unwrap();
+    let cfg2 = tail_core::read_tail_from(&out2).unwrap().unwrap();
     assert!(cfg2.icon_png.is_none());
 
-    // 垃圾图标字节 → 原样存入（运行时解码失败自动回落，不阻塞）
+    // 垃圾图标字节 → inject 失败非阻塞 → tail 仍存 icon_png（运行时解码失败自动回落）
     let out3 = dir.join("product3.bin");
     pack(&out3, "https://example.com", Some(b"garbage".to_vec())).unwrap();
     assert!(out3.exists());
@@ -246,7 +191,7 @@ mod tests {
 
   #[test]
   fn pack_overwrites_existing_tail() {
-    // 自繁殖链路：对同一产物重复打包，旧配置被覆盖（非叠加）
+    // 重复打包：旧配置被覆盖（非叠加）
     let dir = std::env::temp_dir().join("web2app_pack_overwrite");
     fs::create_dir_all(&dir).unwrap();
     let out = dir.join("product.bin");
@@ -254,7 +199,7 @@ mod tests {
     pack(&out, "https://first.com", None).unwrap();
     pack(&out, "https://second.com", None).unwrap();
 
-    let cfg = tail::read_tail_from(&out).unwrap().unwrap();
+    let cfg = tail_core::read_tail_from(&out).unwrap().unwrap();
     assert_eq!(cfg.url, "https://second.com");
 
     // 幂等：同 URL 重复打包体积稳定（覆盖旧尾部，不叠加）
