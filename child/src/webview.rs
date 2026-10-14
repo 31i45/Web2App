@@ -280,28 +280,64 @@ pub(crate) fn inject_script(home: &str) -> String {
 /// 「回首页」快捷键脚本：Alt+Home → 回到起始 URL。
 ///
 /// 浏览器把 Alt+Home 定义为「打开主页」，WebView2 没有主页概念，故由托管方补上。
-/// 两个要点：只注册在最顶层帧（初始化脚本会注入每个帧，若在 iframe 内注册，Alt+Home
-/// 只会导航该 iframe）；是否已在首页在按键时现算而非注入时算定（单页应用经
-/// pushState 改地址不会新建文档，注入时算定的结果会过期）。
+/// 三条不变量，任一失守都表现为「反应慢 / 要多按几次」：
+/// 1. **已在首页必不加载**——比对经 `new URL` 规范化的 origin+pathname+search+hash。
+///    hash 尤其不可漏：hash 路由 SPA 切页只改 hash，漏比会让判定恒为「已在首页」而彻底失效。
+/// 2. **在途必不重复触发**——`location.href` 赋值在提交前不反映新地址，连按会取消并重启
+///    在途导航（重站上越按越慢）。`busy` 在 URL 真正变化时复位，另有兜底定时器覆盖被中止的导航。
+/// 3. **可用则必走 BFCache**——历史中存在首页条目时经 Navigation API `traverseTo` 回跳
+///    （瞬时且保留页面状态，与浏览器后退一致）；历史里没有才回落整页导航。
+///
+/// 只注册在最顶层帧（初始化脚本会注入每个帧，若在 iframe 内注册，Alt+Home 只会导航该
+/// iframe）；是否已在首页在按键时现算而非注入时算定（单页应用改地址不新建文档，注入时
+/// 算定的结果会过期）。已知边界：焦点在跨源 iframe 内时本脚本收不到按键。
 fn home_hotkey_script(home: &str) -> String {
   format!(
     r#"
 (function () {{
   if (window.top !== window.self) {{ return; }}
   var W2A_HOME = {};
-  var atHome = function () {{
+  var HOME_URL = new URL(W2A_HOME);
+  var busy = false;
+
+  function isHome(u) {{
+    try {{ u = new URL(u, location.href); }} catch (e) {{ return false; }}
+    return u.origin === HOME_URL.origin && u.pathname === HOME_URL.pathname
+        && u.search === HOME_URL.search && u.hash === HOME_URL.hash;
+  }}
+
+  // 在途守卫的复位时机：URL 真正变化（跨文档 pagehide、同文档 hashchange/popstate）即解除。
+  ['pagehide', 'hashchange', 'popstate'].forEach(function (t) {{
+    window.addEventListener(t, function () {{ busy = false; }}, true);
+  }});
+
+  function goHome() {{
+    // 优先走会话历史：命中 BFCache 即瞬时返回，且保留原页面状态（与浏览器后退一致）。
     try {{
-      var u = new URL(W2A_HOME);
-      return location.origin === u.origin && location.pathname === u.pathname
-        && location.search === u.search;
-    }} catch (e) {{ return location.href === W2A_HOME; }}
-  }};
+      var nav = window.navigation;
+      if (nav && nav.entries && nav.currentEntry) {{
+        var es = nav.entries();
+        var cur = nav.currentEntry.index;
+        for (var i = Math.min(cur, es.length - 1); i >= 0; i--) {{
+          if (isHome(es[i].url)) {{ nav.traverseTo(es[i].key); return; }}
+        }}
+      }}
+    }} catch (e) {{}}
+    // 历史里没有首页条目（如启动即被重定向）：回落整页导航，行为不退化。
+    busy = true;
+    setTimeout(function () {{ busy = false; }}, 5000);
+    location.href = W2A_HOME;
+  }}
+
   document.addEventListener('keydown', function (ev) {{
     if (!ev.altKey || ev.ctrlKey || ev.shiftKey || ev.metaKey) {{ return; }}
     if (ev.key !== 'Home' && ev.code !== 'Home') {{ return; }}
     ev.preventDefault();
     // 已在首页则不再导航：避免把一次快捷键变成整页刷新、丢掉滚动位置。
-    if (!atHome()) {{ location.href = W2A_HOME; }}
+    if (isHome(location.href)) {{ return; }}
+    // 导航在途则忽略重复触发：再次赋值会取消并重启在途导航，越按越慢。
+    if (busy) {{ return; }}
+    goHome();
   }}, true);
 }})();
 "#,
@@ -408,6 +444,27 @@ mod tests {
     assert!(script.contains("__w2a"), "shared script missing");
     let bare = inject_script("");
     assert!(bare.contains("__w2a") && !bare.contains("W2A_HOME"));
+  }
+
+  #[test]
+  fn home_hotkey_script_has_hash_guard_inflight_guard_and_bfcache_path() {
+    let script = inject_script("https://a.com/#/route");
+    // 1) 判定必须含 hash——否则 hash 路由 SPA 恒判「已在首页」而彻底失效
+    assert!(script.contains("HOME_URL.hash"), "hash not compared: {script}");
+    assert!(script.contains("isHome(location.href)"), "at-home check missing: {script}");
+    // 2) 在途守卫、复位时机与兜底定时器
+    assert!(script.contains("var busy = false"), "no in-flight guard: {script}");
+    assert!(
+      script.contains("'pagehide'") && script.contains("'hashchange'") && script.contains("'popstate'"),
+      "guard never released: {script}"
+    );
+    assert!(
+      script.contains("setTimeout(function () { busy = false; }, 5000)"),
+      "no watchdog reset: {script}"
+    );
+    // 3) 会话历史回跳，且整页导航作为回落仍然存在
+    assert!(script.contains("nav.traverseTo(es[i].key)"), "no bfcache fast path: {script}");
+    assert!(script.contains("location.href = W2A_HOME"), "no navigation fallback: {script}");
   }
 
   #[test]

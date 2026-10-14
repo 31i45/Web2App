@@ -121,7 +121,7 @@ wry 默认关闭了一批 WebView2 原生特性，产物按「桌面浏览器等
 - **新窗口请求路由**（`child/src/popup.rs`）：`target=_blank` / `window.open` 原先被 WebView2 静默丢弃——这正是部分站点「链接点了没反应」的根因。现按 `classify_new_window` 四向分流：空白窗（`window.open()` 无 URL）与带尺寸/位置特征的 `window.open` 在应用内建独立原生窗口（共享发起方 WebView2 环境，OAuth 等会话得以延续）；同站（含互为子域）就地导航；跨站普通链接交系统默认程序；`blob:`/`data:`/`javascript:` 等浏览器内部伪协议忽略（外发无处理器、内载不可靠）。
 - **HTML5 全屏**：注入脚本监听 `fullscreenchange` 上报，由宿主窗口 `set_fullscreen` 完成真全屏（WebView2 内部全屏只填满 webview，并非真全屏）。弹窗对等具备该能力（Win32 原生切换窗口样式）。
 - **导航与缩放热键**：`with_hotkeys_zoom` / `with_back_forward_navigation_gestures`（触摸板横扫）。WebView2 的浏览器快捷键保持默认开启，故 **Alt+←/→ 后退/前进、鼠标侧键** 均原样生效；历史栈完整，可连续回退。
-- **回首页**：Alt+Home 回到打包时配置的起始 URL（WebView2 无「主页」概念，由注入脚本补上；只注册在最顶层帧，且已在首页时不重复导航）。主窗口与弹窗共用同一首页。
+- **回首页**：Alt+Home 回到打包时配置的起始 URL（WebView2 无「主页」概念，由注入脚本补上）。判定经 `URL` 规范化比较（含 `hash`），已在首页不重复导航；历史中存在首页条目时经 Navigation API `traverseTo` 回跳、命中 BFCache 瞬时生效，否则回落整页导航；另加在途守卫避免连按重启导航。只注册在最顶层帧——焦点落在跨源 iframe 内时收不到按键，属已知边界。主窗口与弹窗共用同一首页。
 - **剪贴板读取**：`with_clipboard(true)`（WebView2 默认关闭）。取值是「全局放行任意站点读取」——wry 的权限回调不携带请求 origin，无法按站点收敛，未收敛会牺牲「粘贴」类交互；此为已知边界。
 - **下载**：保持 WebView2 原生下载面板与落点（不注册「开始下载」处理器，一注册即会关掉原生面板），仅在页面内补一条「下载完成 / 下载失败」轻提示。
 - **标题同步**：页面 `document.title` 变化回流主循环——主窗口保留用户配置的品牌标题，弹窗（无配置标题）跟随文档标题。
@@ -172,7 +172,7 @@ Web2App 的核心价值（单文件、自定义图标、零依赖）在 Windows 
 ## 开发
 
 ```powershell
-cargo test --workspace    # 72 个单元测试（tail-core 39 + child 15 + master 18）
+cargo test --workspace    # 73 个单元测试（tail-core 39 + child 16 + master 18）
 .\e2e.ps1                 # 端到端：身份/资源元数据、产物启动、零残留、裸模板不可运行、字节级模板一致性
 cargo clippy --workspace --all-targets -- -D warnings   # 零告警门禁（build.ps1 已含）
 cargo build -p child --release   # 构建 child（master 的前置依赖）
