@@ -13,6 +13,7 @@
 mod builder;
 mod icon;
 mod sign;
+mod tail_write;
 mod ui;
 mod winicon;
 

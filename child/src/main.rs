@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accelerator;
 mod icon;
 mod popup;
 mod webview;

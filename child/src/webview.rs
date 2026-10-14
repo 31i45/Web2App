@@ -31,6 +31,8 @@ pub enum ChildEvent {
   SetTitle(String),
   /// 页面内轻提示（下载反馈等）。
   Toast(String),
+  /// 宿主层 Alt+Home 命中 → 触发页面回首页动作（见 `accelerator`）。
+  GoHome,
 }
 
 /// 打开一个 WebView 窗口并阻塞至窗口关闭。
@@ -75,6 +77,10 @@ pub fn open_webview(config: AppConfig) -> Result<(), String> {
       }
       Event::UserEvent(ChildEvent::Toast(msg)) => {
         let _ = webview.evaluate_script(&toast_script(&msg));
+      }
+      Event::UserEvent(ChildEvent::GoHome) => {
+        // 宿主层 Alt+Home（`accelerator`）回流到此：调用页面暴露的 `window.__w2aHome()`。
+        let _ = webview.evaluate_script(HOME_GO_SCRIPT);
       }
       Event::WindowEvent {
         event: WindowEvent::CloseRequested,
@@ -142,6 +148,8 @@ pub fn build_webview(
   let ipc_proxy = proxy.clone();
   let title_proxy = proxy.clone();
   let download_done_proxy = proxy.clone();
+  // 宿主层 Alt+Home 的送达通道（`proxy` 本身随后被 new-window 闭包 move 掉）。
+  let home_proxy = proxy.clone();
   let host_for_load = Arc::clone(&current_host);
   // 回首页目标：主窗口与弹窗共用同一份（弹窗内的 Alt+Home 也回到应用起始页）。
   let home_for_popup = config.url.clone();
@@ -200,8 +208,21 @@ pub fn build_webview(
     builder = builder.with_devtools(true);
   }
 
-  builder.build(window)
+  let webview = builder.build(window)?;
+  // 宿主层 Alt+Home：跨源 iframe 焦点下页面层收不到按键，由 AcceleratorKeyPressed 在
+  // 「送达内容层之前」兜底。动作经 proxy 回流主循环，不在 COM 回调内同步 evaluate_script
+  // （WebView2 回调重入风险）。注册失败静默忽略；阶段门控见 accelerator::HOST_ONLY。
+  crate::accelerator::register(&webview, home_proxy);
+  Ok(webview)
 }
+
+/// 宿主层「回首页」动作脚本（AcceleratorKeyPressed 命中后由主循环/弹窗执行）。
+///
+/// 只调用页面暴露的 `window.__w2aHome()`：判定与去重单点在页面层（见
+/// [`home_hotkey_script`]），避免两层各持一份规则而漂移。`window.__w2aHome` 不存在
+/// （如页面尚未注入脚本）时静默无操作。
+pub(crate) const HOME_GO_SCRIPT: &str =
+  "(function(){try{window.__w2aHome&&window.__w2aHome();}catch(e){}})();";
 
 /// 注入页面的初始化脚本：HTML5 全屏状态上报 + 页面内轻提示。
 ///
@@ -288,17 +309,24 @@ pub(crate) fn inject_script(home: &str) -> String {
 /// 3. **可用则必走 BFCache**——历史中存在首页条目时经 Navigation API `traverseTo` 回跳
 ///    （瞬时且保留页面状态，与浏览器后退一致）；历史里没有才回落整页导航。
 ///
+/// 分层：本脚本是**决策层**（[`homeAction`] 集中「已在首页 / 在途守卫 / BFCache 回跳」），
+/// 通过 `window.__w2aHome`（`writable:false`、`configurable:false`，防页面抢注）暴露给宿主层
+/// [`HOME_GO_SCRIPT`]；宿主层只负责把跨源 iframe 内收不到的按键送达此处。
 /// 只注册在最顶层帧（初始化脚本会注入每个帧，若在 iframe 内注册，Alt+Home 只会导航该
 /// iframe）；是否已在首页在按键时现算而非注入时算定（单页应用改地址不新建文档，注入时
-/// 算定的结果会过期）。已知边界：焦点在跨源 iframe 内时本脚本收不到按键。
+/// 算定的结果会过期）。
+///
+/// 页面层 `keydown` 与宿主层并存与否由 [`crate::accelerator::HOST_ONLY`] 决定：阶段 1 并存、
+/// 阶段 2 由宿主层独占。两层并存时 `goHome` 内的 200ms 时间戳去重防止同一次按键双重导航。
 fn home_hotkey_script(home: &str) -> String {
-  format!(
+  let mut script = format!(
     r#"
 (function () {{
   if (window.top !== window.self) {{ return; }}
   var W2A_HOME = {};
   var HOME_URL = new URL(W2A_HOME);
   var busy = false;
+  var lastHome = 0;
 
   function isHome(u) {{
     try {{ u = new URL(u, location.href); }} catch (e) {{ return false; }}
@@ -312,6 +340,10 @@ fn home_hotkey_script(home: &str) -> String {
   }});
 
   function goHome() {{
+    // 双击去重：宿主层与页面层可能对同一次按键各派发一次，200ms 内只认第一次。
+    var now = Date.now();
+    if (now - lastHome < 200) {{ return; }}
+    lastHome = now;
     // 优先走会话历史：命中 BFCache 即瞬时返回，且保留原页面状态（与浏览器后退一致）。
     try {{
       var nav = window.navigation;
@@ -329,20 +361,38 @@ fn home_hotkey_script(home: &str) -> String {
     location.href = W2A_HOME;
   }}
 
-  document.addEventListener('keydown', function (ev) {{
-    if (!ev.altKey || ev.ctrlKey || ev.shiftKey || ev.metaKey) {{ return; }}
-    if (ev.key !== 'Home' && ev.code !== 'Home') {{ return; }}
-    ev.preventDefault();
+  // 决策单点：页面层 keydown 与宿主层 AcceleratorKeyPressed 共用此入口。
+  function homeAction() {{
     // 已在首页则不再导航：避免把一次快捷键变成整页刷新、丢掉滚动位置。
     if (isHome(location.href)) {{ return; }}
     // 导航在途则忽略重复触发：再次赋值会取消并重启在途导航，越按越慢。
     if (busy) {{ return; }}
     goHome();
-  }}, true);
-}})();
+  }}
+
+  // 宿主层入口：不可被页面抢注（否则页面一改 __w2aHome 回首页即失效）。
+  try {{
+    Object.defineProperty(window, '__w2aHome', {{
+      value: homeAction, writable: false, configurable: false
+    }});
+  }} catch (e) {{}}
 "#,
     tail_core::js_string_literal(home)
-  )
+  );
+  if !crate::accelerator::HOST_ONLY {
+    script.push_str(
+      r#"
+  document.addEventListener('keydown', function (ev) {
+    if (!ev.altKey || ev.ctrlKey || ev.shiftKey || ev.metaKey) { return; }
+    if (ev.key !== 'Home' && ev.code !== 'Home') { return; }
+    ev.preventDefault();
+    homeAction();
+  }, true);
+"#,
+    );
+  }
+  script.push_str("\n})();\n");
+  script
 }
 
 /// 生成调用页面内轻提示的脚本（消息转义为 JS 字符串字面量，零 serde）。
@@ -465,6 +515,31 @@ mod tests {
     // 3) 会话历史回跳，且整页导航作为回落仍然存在
     assert!(script.contains("nav.traverseTo(es[i].key)"), "no bfcache fast path: {script}");
     assert!(script.contains("location.href = W2A_HOME"), "no navigation fallback: {script}");
+  }
+
+  #[test]
+  fn inject_script_exposes_w2a_home_and_gates_page_keydown() {
+    let script = inject_script("https://a.com/");
+    // 宿主层入口必须存在，且不可被页面抢注（否则回首页会失效）
+    assert!(script.contains("__w2aHome"), "host entry missing: {script}");
+    assert!(
+      script.contains("writable: false, configurable: false"),
+      "host entry not locked: {script}"
+    );
+    // 决策单点：页面层 keydown 与宿主层共用 homeAction
+    assert!(script.contains("function homeAction()"), "decision entry missing: {script}");
+    // 阶段门控随 accelerator::HOST_ONLY 自动切换：阶段 1 并存、阶段 2 由宿主层独占
+    if crate::accelerator::HOST_ONLY {
+      assert!(
+        !script.contains("addEventListener('keydown'"),
+        "HOST_ONLY 下必须删除页面层 keydown: {script}"
+      );
+    } else {
+      assert!(
+        script.contains("addEventListener('keydown'"),
+        "阶段 1 页面层 keydown 必须与宿主层并存: {script}"
+      );
+    }
   }
 
   #[test]

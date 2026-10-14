@@ -11,6 +11,9 @@
 #   6. 母版表单：web2app.exe 启动 + 关闭零残留
 #   7. 字节级：产物裸主体 == child.exe（模板复制，非自身繁殖）；覆盖尾部不膨胀
 #
+# 注：Alt+Home 回首页为**人工验收**——跨源 iframe 场景的 AppActivate + SendKeys
+#     自动断言复杂度与 flaky 风险高，经决策不做自动化（见方案步骤 3/6 的手工 spike 矩阵）。
+#
 # 用法：.\e2e.ps1 [-MasterPath target\release\web2app.exe] [-ChildPath target\release\child.exe]
 # 退出码：0 全过；1 任一检查失败。
 param(
@@ -64,14 +67,43 @@ function Assert($cond, $name) {
   else { Write-Host "  FAIL  $name"; $script:failed = $true }
 }
 
-# 构造产物（与 builder::pack 相同的尾部追加语义）
+# CRC32（IEEE 802.3，反射多项式 0xEDB88320）——手工位运算实现。
+# 与 tail-core::payload_crc 等价：覆盖 payload || payload_len:u64(LE) || ver。
+# 注意：这里是尾部格式的**漂移点**，布局常量以 tail-core::TAIL_V3_FOOTER_LEN 为准。
+function Get-Crc32([byte[]]$data) {
+  # 注意：PowerShell 把 8 位十六进制字面量 0xFFFFFFFF 解析为 -1（int32），
+  # 必须用 [uint32]::MaxValue；0xEDB88320 亦以十进制写出避免歧义。
+  $crc = [uint32]::MaxValue
+  foreach ($b in $data) {
+    $crc = [uint32](($crc -bxor [uint32]$b))
+    for ($i = 0; $i -lt 8; $i++) {
+      if ($crc -band 1) { $crc = [uint32](($crc -shr 1) -bxor [uint32]3988292384) }
+      else { $crc = [uint32]($crc -shr 1) }
+    }
+  }
+  return [uint32]($crc -bxor [uint32]::MaxValue)
+}
+
+# 构造产物（与 builder::pack + tail-core::encode_tail 相同的 v3 尾部语义）
 function New-Product([string]$name, [string]$json, [byte[]]$base) {
   $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
-  $buf = New-Object byte[] ($base.Length + $payload.Length + 24)
+  $lenBytes = [BitConverter]::GetBytes([UInt64]$payload.Length)
+  $ver = [byte]1
+  # CRC 输入 = payload || len(8) || ver(1)
+  $crcInput = New-Object byte[] ($payload.Length + 9)
+  [Array]::Copy($payload, 0, $crcInput, 0, $payload.Length)
+  [Array]::Copy($lenBytes, 0, $crcInput, $payload.Length, 8)
+  $crcInput[$payload.Length + 8] = $ver
+  $crc = Get-Crc32 $crcInput
+
+  $buf = New-Object byte[] ($base.Length + $payload.Length + 29)
   [Array]::Copy($base, 0, $buf, 0, $base.Length)
   [Array]::Copy($payload, 0, $buf, $base.Length, $payload.Length)
   [Array]::Copy($MAGIC, 0, $buf, ($base.Length + $payload.Length), 16)
-  [BitConverter]::GetBytes([UInt64]$payload.Length).CopyTo($buf, ($base.Length + $payload.Length + 16))
+  [Array]::Copy($lenBytes, 0, $buf, ($base.Length + $payload.Length + 16), 8)
+  $buf[$base.Length + $payload.Length + 24] = $ver
+  [BitConverter]::GetBytes([UInt32]$crc).CopyTo($buf, ($base.Length + $payload.Length + 25))
+
   $p = Join-Path $dir $name
   [System.IO.File]::WriteAllBytes($p, $buf)
   return @($p, $payload.Length)
@@ -177,8 +209,9 @@ try {
   # ---- 7. 字节级：模板复制 + 覆盖尾部零膨胀 ----
   Write-Host "`n[6] byte-level template identity & overwrite"
   $gen1 = [System.IO.File]::ReadAllBytes($p1)
-  $len = [BitConverter]::ToUInt64($gen1, $gen1.Length - 8)
-  $base = $gen1[0..($gen1.Length - 25 - [int]$len)]
+  # v3 帧：MAGIC(16) | len(8) | ver(1) | crc(4)，共 29B；len 字段位于结尾前 13 字节
+  $len = [BitConverter]::ToUInt64($gen1, $gen1.Length - 13)
+  $base = $gen1[0..($gen1.Length - 30 - [int]$len)]
   Assert ($base.Length -eq $childBytes.Length) "product body length == child.exe (template copy)"
   $prefixSame = [System.Linq.Enumerable]::SequenceEqual([byte[]]$base, [byte[]]$childBytes)
   Assert $prefixSame "product body byte-identical to child.exe"
@@ -189,8 +222,8 @@ try {
   $gen2 = [System.IO.File]::ReadAllBytes($p2)
   $gen2Same = [System.Linq.Enumerable]::SequenceEqual([byte[]]($gen2[0..($base.Length - 1)]), [byte[]]$base)
   Assert $gen2Same "re-packed body stays byte-identical"
-  $expectLen = $base.Length + $ret2[1] + 24
-  Assert ($gen2.Length -eq $expectLen) "no size accumulation ($($gen2.Length) B == base + payload + 24)"
+  $expectLen = $base.Length + $ret2[1] + 29
+  Assert ($gen2.Length -eq $expectLen) "no size accumulation ($($gen2.Length) B == base + payload + 29)"
   $proc2 = Start-Process -FilePath $p2 -PassThru
   Assert (Wait-WebView "Web2App\apps\second.io") "re-packed product runs"
   Assert (-not $proc2.HasExited) "gen2 host alive"

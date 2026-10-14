@@ -1,5 +1,6 @@
 /target/
 /.temp/
+/.trae/
 
 # dist 为本地构建产物，不入库；发布物一律由 CI 构建并发布到 GitHub Releases
 /dist/

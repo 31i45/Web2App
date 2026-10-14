@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::num::NonZeroIsize;
 use std::rc::Rc;
 
-use crate::webview::inject_script;
+use crate::webview::{inject_script, HOME_GO_SCRIPT};
 use wry::raw_window_handle::{
   HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
 };
@@ -272,6 +272,13 @@ pub fn create(url: &str, features: NewWindowFeatures, home: &str) -> Option<NewW
   let core = webview.webview();
   // SAFETY: hwnd 有效且属于本线程。
   unsafe { ShowWindow(hwnd, SW_SHOW) };
+  // 宿主层 Alt+Home（弹窗路径）：弹窗无 tao 事件循环，命中后 PostMessage 到本窗口，
+  // 由 popup_wnd_proc 的 WM_APP_HOME 分支取 POPUPS[hwnd] 执行回首页脚本
+  // （wry 的 subclass 未处理的消息会经 DefSubclassProc 回到我们的窗口过程）。
+  crate::accelerator::register_with(&webview, move || {
+    // SAFETY: hwnd 为刚创建的有效顶层窗口；PostMessageW 本身线程安全。
+    unsafe { PostMessageW(hwnd, WM_APP_HOME, 0, 0) };
+  });
   POPUPS.with(|m| {
     m.borrow_mut().insert(hwnd, webview);
   });
@@ -394,6 +401,16 @@ unsafe extern "system" fn popup_wnd_proc(
       drop(owned);
       0
     }
+    WM_APP_HOME => {
+      // 宿主层 Alt+Home 送达（见 create 内的注册）：取本窗 WebView 执行页面
+      // 暴露的 `window.__w2aHome`。仅调用，不做判定——决策逻辑单点在页面层。
+      POPUPS.with(|m| {
+        if let Some(wv) = m.borrow().get(&hwnd) {
+          let _ = wv.evaluate_script(HOME_GO_SCRIPT);
+        }
+      });
+      0
+    }
     _ => DefWindowProcW(hwnd, msg, wparam, lparam),
   }
 }
@@ -478,6 +495,8 @@ const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 const SW_SHOW: i32 = 5;
 const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
+/// 宿主层 Alt+Home 的自定义消息（WM_APP+1）：弹窗路径经 PostMessage 送达。
+const WM_APP_HOME: u32 = 0x8001;
 const COLOR_WINDOW: isize = 5;
 const IDC_ARROW: usize = 32512;
 const GWL_STYLE: i32 = -16;
@@ -553,6 +572,7 @@ extern "system" {
   fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
   fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
   fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
+  fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 #[cfg(test)]

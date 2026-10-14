@@ -9,6 +9,13 @@
 //!
 //! 关键：inject 必须在 write_tail 之前——EndUpdateResource 重写整个 PE，
 //! 会丢弃尾部追加的任何字节。
+//!
+//! 图标缓存刷新（SHChangeNotify）——方案原列为条件性项：需先实测「同一路径重包
+//! 并换图标」时 Explorer 是否沿用旧图标，测出陈旧才补通知。此处未实测到陈旧
+//! （新建与覆盖均即时显示新图标），故**不加** SHChangeNotify，避免留下永不触发
+//! 的死代码。若将来在某 Windows 版本上实测到 Explorer 图标陈旧，再在
+//! EndUpdateResourceW 提交成功后，以**最终显示路径**为对象补
+//! `SHCNE_UPDATEITEM | SHCNF_PATHW | SHCNF_FLUSH`。
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;

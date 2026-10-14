@@ -9,6 +9,7 @@ description = "Web2App 子应用运行时（用户分发的精简单文件产物
 tail-core = { workspace = true }
 wry = { workspace = true }
 tao = { workspace = true }
+webview2-com = { workspace = true }
 
 [dev-dependencies]
 png = { workspace = true }

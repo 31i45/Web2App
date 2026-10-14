@@ -76,7 +76,7 @@ pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result
 
     // 3) 追加尾部配置（config 携带 icon_png 供运行时窗口图标）
     let config = AppConfig::new(url.to_string(), title, icon_png);
-    let size = tail_core::write_tail(&tmp_out, &config)?;
+    let size = crate::tail_write::write_tail(&tmp_out, &config)?;
 
     // 4) 原子落盘：先写临时文件再 rename，避免半写产物。
     // rename 失败常见原因：目标被占用（Windows 文件锁，如旧产物正在运行）、
@@ -134,7 +134,7 @@ mod tests {
     let product_body = tail_core::strip_tail(CHILD_TEMPLATE).to_vec();
     let cfg = AppConfig::new("https://example.com".into(), "example.com".into(), None);
     fs::write(&out, &product_body).unwrap();
-    tail_core::write_tail(&out, &cfg).unwrap();
+    crate::tail_write::write_tail(&out, &cfg).unwrap();
 
     let read_back = tail_core::read_tail_from(&out).unwrap().unwrap();
     assert_eq!(read_back.url, "https://example.com");

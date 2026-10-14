@@ -3,7 +3,7 @@ members = ["tail-core", "child", "master"]
 resolver = "2"
 
 [workspace.package]
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 license = "MIT"
 
@@ -12,6 +12,10 @@ tail-core = { path = "tail-core" }
 wry = { version = "0.57", default-features = false, features = ["devtools"] }
 tao = "0.37"
 png = "0.18"
+# 宿主层 Alt+Home 需要 `ICoreWebView2Controller::add_AcceleratorKeyPressed`，
+# wry 未 re-export 该类型 → 必须直接依赖。版本与 wry 传递依赖一致，
+# 不引入任何新 crate、不增加产物体积（见 audit.ps1 的 cargo tree 断言）。
+webview2-com = "0.39"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 
 # Release 产物极致轻量：全 workspace 共享同一组优化开关。

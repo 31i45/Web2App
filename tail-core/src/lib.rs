@@ -1,6 +1,8 @@
 //! tail-core — Web2App 共享层。
 //!
-//! 三方共用：尾部协议（child 读取运行配置 / master 写入打包配置）、
+//! 三方共用：尾部协议（child 读取运行配置；**写尾已外迁 `master/src/tail_write.rs`**，
+//! 本 crate 只保留解析与 [`encode_tail`] 编码纯函数——写能力不在 child 的依赖图中，
+//! 构成编译期结构性保证）、
 //! PNG 解码与缩放（child 把用户图与 w2a 默认图转为像素，供 tao Icon 用）、
 //! URL 工具（master 产物文件名与 child 数据目录共用 sanitize_host 单点持有）、
 //! 致命错误呈现（Windows GUI 子系统下 stderr 无人看，必须 MessageBox）。
@@ -12,7 +14,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -21,6 +23,20 @@ use std::path::{Path, PathBuf};
 
 /// 尾部魔数。选 16 字节保证足够独特、极低误撞率。
 pub const TAIL_MAGIC: &[u8; 16] = b"__WEB2APP_TAIL__";
+
+/// v2 帧字节数：`MAGIC:16 | payload_len:u64`（历史格式，仍可读）。
+const FOOTER_V2_LEN: usize = 24;
+/// v3 帧字节数：`MAGIC:16 | payload_len:u64 | ver:u8 | crc32:u32`。
+const FOOTER_V3_LEN: usize = 29;
+/// 当前写入格式（v3）的帧字节数——**单一事实源**：master 写尾测试、e2e 体积
+/// 断言、审计脚本均以此为准，避免各方硬编码 29 造成漂移。
+pub const TAIL_V3_FOOTER_LEN: usize = FOOTER_V3_LEN;
+/// 版本字节：`1 = CRC32-IEEE`，校验和覆盖 `payload || payload_len:u64 || ver`
+/// （**不含** MAGIC）。将来新增版本必须在 [`locate_in`] 探测处显式登记。
+const TAIL_VERSION_CRC32: u8 = 1;
+/// 尾部探测窗口：末尾固定读取的字节数。须 ≥ 最长 footer（v3 = 29B）并留余量，
+/// 供「窗口内含 MAGIC 但无合法帧」的损坏判定。footer 变长时必须同步此常量。
+const TAIL_WINDOW: usize = 64;
 
 /// 单个 Web2App 应用的全部配置（即尾部 payload 的 JSON 形态）。
 #[derive(Debug, Clone, PartialEq)]
@@ -77,60 +93,219 @@ pub fn read_tail() -> io::Result<Option<AppConfig>> {
 }
 
 /// 读取指定文件的尾部配置（单测/工具模式共用）。
+///
+/// 只读「末尾窗口 + payload」两段，不做全量 `fs::read`（大 exe 场景显著降低 I/O
+/// 与内存峰值）。分类口径与内存解析 [`classify`] 完全一致：
+/// 无尾部 / 帧外 → `Ok(None)`；结构损坏或 CRC 不符 → `Err`（child 据此提示
+/// 「文件可能已损坏」）；合法帧 → `Ok(Some(config))`。
 pub fn read_tail_from(path: &Path) -> io::Result<Option<AppConfig>> {
-  let bytes = fs::read(path)?;
-  Ok(extract_tail(&bytes))
+  let mut file = fs::File::open(path)?;
+  let file_len = file.metadata()?.len();
+  if file_len < FOOTER_V2_LEN as u64 {
+    return Ok(None);
+  }
+  let win_len = TAIL_WINDOW.min(file_len as usize);
+  let win_start = file_len - win_len as u64;
+  let mut window = vec![0u8; win_len];
+  file.seek(SeekFrom::Start(win_start))?;
+  file.read_exact(&mut window)?;
+
+  let (start, len, crc) = match locate_in(&window, file_len) {
+    Frame::Absent => return Ok(None),
+    Frame::Corrupt => return Err(corrupt_error()),
+    Frame::Valid { start, len, crc } => (start, len, crc),
+  };
+
+  let mut payload = vec![0u8; len];
+  file.seek(SeekFrom::Start(start as u64))?;
+  file.read_exact(&mut payload)?;
+
+  if let Some(expected) = crc {
+    if payload_crc(&payload) != expected {
+      return Err(corrupt_error());
+    }
+  }
+  // 结构合法（且 CRC 通过）却无法解析 JSON：与内存解析口径一致，判为损坏。
+  match std::str::from_utf8(&payload).ok().and_then(AppConfig::from_json) {
+    Some(cfg) => Ok(Some(cfg)),
+    None => Err(corrupt_error()),
+  }
 }
 
-/// 把配置追加到目标文件：先剥离旧尾部，再写入新尾部。
-/// 返回追加后的文件总大小。
-pub fn write_tail(path: &Path, config: &AppConfig) -> io::Result<u64> {
-  let bytes = fs::read(path)?;
-  let base = strip_tail(&bytes);
-  let payload = config.to_json();
-  let mut out = base.to_vec();
-  out.extend_from_slice(payload.as_bytes());
+/// 尾部损坏的 I/O 错误（child 主入口据此显示「文件可能已损坏」）。
+fn corrupt_error() -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, "尾部配置已损坏")
+}
+
+/// 把 payload 编码为 v3 尾部帧：
+/// `payload | MAGIC:16 | payload_len:u64 | ver:u8 | crc32:u32`。
+///
+/// 纯编码函数（**不**落盘）；写盘能力在 `master/src/tail_write.rs`，
+/// 故 child 的依赖图中不含任何写尾代码。
+pub fn encode_tail(payload: &[u8]) -> Vec<u8> {
+  let mut out = Vec::with_capacity(payload.len() + FOOTER_V3_LEN);
+  out.extend_from_slice(payload);
   out.extend_from_slice(TAIL_MAGIC);
   out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-  fs::write(path, &out)?;
-  Ok(out.len() as u64)
+  out.push(TAIL_VERSION_CRC32);
+  out.extend_from_slice(&payload_crc(payload).to_le_bytes());
+  out
 }
 
-/// 从字节流尾部提取配置。无尾部 → None。
+/// 从字节流尾部提取配置。无尾部 / 损坏 → None。
+///
+/// 只读解析接口（损坏明细被折叠为 None）；需要区分「损坏 vs 无尾」请用
+/// [`read_tail_from`]。损坏折叠口径与磁盘读一致：CRC 不符亦视为损坏 → None。
 pub fn extract_tail(bytes: &[u8]) -> Option<AppConfig> {
-  let (payload, _) = split_tail(bytes)?;
-  let s = std::str::from_utf8(payload).ok()?;
-  AppConfig::from_json(s)
+  match classify(bytes) {
+    Frame::Valid { start, len, .. } => {
+      std::str::from_utf8(&bytes[start..start + len]).ok().and_then(AppConfig::from_json)
+    }
+    _ => None,
+  }
+}
+
+/// 尾部帧定位结果（读写两路共用，保证分类一致）。
+enum Frame {
+  /// 无尾部（母版 / 运行时组件）。
+  Absent,
+  /// 尾部损坏：存在 MAGIC 但无合法帧，或（经 [`classify`]）CRC 不符。
+  Corrupt,
+  /// 合法帧：`start` = payload 起点，`len` = payload 长度，
+  /// `crc` = Some(v3 校验和) / None(v2 兼容格式)。
+  Valid { start: usize, len: usize, crc: Option<u32> },
+}
+
+/// 在「文件末尾窗口」内定位尾部帧（纯函数，读写两路共用）。
+///
+/// `window` 必须是文件的**最后** `min(TAIL_WINDOW, file_len)` 字节，`file_len`
+/// 为文件绝对长度（磁盘读取自 metadata、内存解析取 `bytes.len()`）。
+///
+/// 探测顺序（**顺序写反是本设计最易错处**，见 `crc_mismatch_yields_err` 单测）：
+/// 1. 末 29B 成 v3 帧（`MAGIC && ver == 1`）→ 采用（CRC 校验在 [`classify`] 内）；
+/// 2. 末 24B 成 v2 帧 → 兼容接受（跳过 CRC）；
+/// 3. 窗口内出现 MAGIC 但无合法帧（典型：footer 被截 ≤13 字节）→ 损坏；
+/// 4. 窗口内无 MAGIC → 无尾部。
+fn locate_in(window: &[u8], file_len: u64) -> Frame {
+  let flen = file_len as usize;
+  let win_start = flen - window.len();
+  // 窗口内取绝对区间 [start, start+len) 的切片；越界（或已被切走）返回 None。
+  let at = |start: usize, len: usize| -> Option<&[u8]> {
+    if start < win_start || start + len > flen {
+      return None;
+    }
+    Some(&window[start - win_start..start - win_start + len])
+  };
+
+  // 1) v3：MAGIC | len | ver | crc
+  if flen >= FOOTER_V3_LEN {
+    let fs = flen - FOOTER_V3_LEN;
+    let magic_ok = at(fs, TAIL_MAGIC.len()) == Some(&TAIL_MAGIC[..]);
+    if magic_ok && window[fs + 24 - win_start] == TAIL_VERSION_CRC32 {
+      let len = u64::from_le_bytes(at(fs + 16, 8).unwrap().try_into().unwrap()) as usize;
+      let crc = u32::from_le_bytes(at(fs + 25, 4).unwrap().try_into().unwrap());
+      return if len <= fs {
+        Frame::Valid { start: fs - len, len, crc: Some(crc) }
+      } else {
+        Frame::Corrupt // MAGIC/版本对但长度越界 → 无合法帧
+      };
+    }
+  }
+  // 2) v2：MAGIC | len（向后兼容，跳过 CRC）
+  if flen >= FOOTER_V2_LEN {
+    let fs = flen - FOOTER_V2_LEN;
+    if at(fs, TAIL_MAGIC.len()) == Some(&TAIL_MAGIC[..]) {
+      let len = u64::from_le_bytes(at(fs + 16, 8).unwrap().try_into().unwrap()) as usize;
+      return if len <= fs {
+        Frame::Valid { start: fs - len, len, crc: None }
+      } else {
+        Frame::Corrupt
+      };
+    }
+  }
+  // 3) 窗口内含 MAGIC 但无合法帧 → 损坏（footer 被截断的典型特征）
+  if window.windows(TAIL_MAGIC.len()).any(|w| w == &TAIL_MAGIC[..]) {
+    return Frame::Corrupt;
+  }
+  Frame::Absent
+}
+
+/// 在完整字节流上定位并（对 v3）校验 CRC —— 内存解析的规范分类口径。
+///
+/// 与 [`read_tail_from`] 共用 [`locate_in`]，二者分类必然一致
+/// （见 `read_tail_from_matches_in_memory_parser_on_corpus` 单测）。
+fn classify(bytes: &[u8]) -> Frame {
+  let win_start = bytes.len().saturating_sub(TAIL_WINDOW);
+  match locate_in(&bytes[win_start..], bytes.len() as u64) {
+    Frame::Valid { start, len, crc } => {
+      if let Some(expected) = crc {
+        if payload_crc(&bytes[start..start + len]) != expected {
+          return Frame::Corrupt;
+        }
+      }
+      Frame::Valid { start, len, crc }
+    }
+    other => other,
+  }
 }
 
 /// 按尾部协议拆分：返回 (payload 切片, 剥离后裸程序切片)。
-/// 布局：`<payload> <MAGIC:16> <payload_len:u64 LE>`。
+/// 布局（v3）：`<payload> <MAGIC:16> <payload_len:u64 LE> <ver:u8> <crc32:u32>`。
+///
+/// 结构合法即拆分（**不**校验 CRC）：剥离是纯切片操作，损坏帧亦须剥离，
+/// 否则重打包时旧尾会被保留并累积膨胀（见 builder 的覆盖零膨胀单测）。
 fn split_tail(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
-  if bytes.len() < TAIL_MAGIC.len() + 8 {
-    return None;
+  let win_start = bytes.len().saturating_sub(TAIL_WINDOW);
+  match locate_in(&bytes[win_start..], bytes.len() as u64) {
+    Frame::Valid { start, len, .. } => Some((&bytes[start..start + len], &bytes[..start])),
+    _ => None,
   }
-  let tail_len_end = bytes.len();
-  let magic_end = tail_len_end - 8;
-  let magic_start = magic_end - TAIL_MAGIC.len();
-  if &bytes[magic_start..magic_end] != TAIL_MAGIC {
-    return None;
-  }
-  let len_bytes: [u8; 8] = bytes[magic_end..tail_len_end].try_into().ok()?;
-  let payload_len = u64::from_le_bytes(len_bytes) as usize;
-  let payload_end = magic_start;
-  if payload_len > payload_end {
-    return None;
-  }
-  let payload_start = payload_end - payload_len;
-  Some((&bytes[payload_start..payload_end], &bytes[..payload_start]))
 }
 
-/// 剥离尾部配置，返回裸程序字节切片。
+/// 剥离尾部配置，返回裸程序字节切片。无尾部 / 帧外 → 原样返回。
 pub fn strip_tail(bytes: &[u8]) -> &[u8] {
   match split_tail(bytes) {
     Some((_, base)) => base,
     None => bytes,
   }
+}
+
+/// CRC32（IEEE 802.3，反射多项式 `0xEDB88320`）——位运算无查表实现。
+///
+/// payload 仅数百字节（约 4800 次内层迭代），无需查表；零表零静态、零新依赖，
+/// 契合极简红线。向量由 `crc32_known_vectors` 单测钉死（`b"123456789"` 的权威值）。
+struct Crc32(u32);
+
+impl Crc32 {
+  fn new() -> Self {
+    Self(0xFFFF_FFFF)
+  }
+
+  fn update(&mut self, data: &[u8]) {
+    for &b in data {
+      self.0 ^= u32::from(b);
+      for _ in 0..8 {
+        let mask = (self.0 & 1).wrapping_neg();
+        self.0 = (self.0 >> 1) ^ (0xEDB8_8320 & mask);
+      }
+    }
+  }
+
+  fn finish(self) -> u32 {
+    !self.0
+  }
+}
+
+/// v3 帧校验和：覆盖 `payload || payload_len:u64 (LE) || ver`。
+///
+/// 覆盖长度字段可捕获「payload 被改但长度未变」之外的多数篡改；覆盖 ver 使
+/// 版本字节本身也受保护。不含 MAGIC（定长常量，改动即意味着整个协议变更）。
+fn payload_crc(payload: &[u8]) -> u32 {
+  let mut c = Crc32::new();
+  c.update(payload);
+  c.update(&(payload.len() as u64).to_le_bytes());
+  c.update(&[TAIL_VERSION_CRC32]);
+  c.finish()
 }
 
 /// 当前可执行文件路径（Windows 下手动剥离 `\\?\` verbatim 前缀，零依赖替代 dunce）。
@@ -648,14 +823,14 @@ pub fn arm_close_watchdog(hwnd: isize) {
 }
 
 // ============================================================================
-// 测试（39 个：tail 协议 20 + PNG/缩放 6 + URL 工具 6 + 边界补充 7）
+// 测试（44 个：tail 协议 25 + PNG/缩放 6 + URL 工具 6 + 边界补充 7）
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
   use super::*;
 
-  // ---------- tail.rs 测试（20 个） ----------
+  // ---------- tail.rs 测试（25 个） ----------
 
   fn sample() -> AppConfig {
     AppConfig::new("https://example.com/app".into(), "My App".into(), None)
@@ -780,24 +955,214 @@ mod tests {
   }
 
   #[test]
-  fn write_tail_overwrites_old_tail() {
+  fn crc32_known_vectors() {
+    let crc = |d: &[u8]| {
+      let mut c = Crc32::new();
+      c.update(d);
+      c.finish()
+    };
+    assert_eq!(crc(b""), 0);
+    assert_eq!(crc(b"123456789"), 0xCBF4_3926); // IEEE 802.3 权威向量
+    assert_eq!(crc(b"a"), 0xE8B7_BE43);
+  }
+
+  #[test]
+  fn encode_tail_v3_layout_and_roundtrip() {
+    let c = sample();
+    let payload = c.to_json();
+    let frame = encode_tail(payload.as_bytes());
+    assert_eq!(frame.len(), payload.len() + FOOTER_V3_LEN);
+    // 布局：payload | MAGIC:16 | len:u64 | ver:u8 | crc32:u32
+    let m = payload.len();
+    assert_eq!(&frame[m..m + 16], &TAIL_MAGIC[..]);
+    assert_eq!(u64::from_le_bytes(frame[m + 16..m + 24].try_into().unwrap()), payload.len() as u64);
+    assert_eq!(frame[m + 24], TAIL_VERSION_CRC32);
+    assert_eq!(u32::from_le_bytes(frame[m + 25..m + 29].try_into().unwrap()), payload_crc(payload.as_bytes()));
+    // 内存读回 + 剥离
+    let mut bytes = b"MZ body 0123456789".to_vec();
+    bytes.extend_from_slice(&frame);
+    assert_eq!(extract_tail(&bytes).unwrap(), c);
+    assert_eq!(strip_tail(&bytes), b"MZ body 0123456789");
+  }
+
+  #[test]
+  fn v2_tail_still_readable() {
+    // 历史 v2 格式（无 CRC）仍可读；剥离按 24B footer
+    let c = sample();
+    let payload = c.to_json();
+    let mut bytes = b"MZ legacy".to_vec();
+    bytes.extend_from_slice(payload.as_bytes());
+    bytes.extend_from_slice(TAIL_MAGIC);
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    assert_eq!(extract_tail(&bytes).unwrap(), c);
+    assert_eq!(strip_tail(&bytes), b"MZ legacy");
+  }
+
+  #[test]
+  fn crc_mismatch_yields_err_on_disk_and_none_in_memory() {
+    let c = sample();
+    let payload = c.to_json();
+    let mut frame = encode_tail(payload.as_bytes());
+    let last = frame.len() - 1;
+    frame[last] ^= 0xFF; // 篡改 CRC 尾字节
+    let mut bytes = b"MZ body 0123456789".to_vec();
+    bytes.extend_from_slice(&frame);
+
+    // 磁盘路径：损坏必须显式报错（供 child 提示「文件可能已损坏」）
     let dir = std::env::temp_dir().join("web2app_tail_tests");
     fs::create_dir_all(&dir).unwrap();
-    let f = dir.join("fake.exe");
-    fs::write(&f, b"MZ base program 0123456789").unwrap();
+    let f = dir.join("crc_mismatch.bin");
+    fs::write(&f, &bytes).unwrap();
+    assert!(read_tail_from(&f).is_err());
+    // 内存路径：损坏折叠为 None
+    assert!(extract_tail(&bytes).is_none());
+    // 未被篡改的对照帧仍是 Some（证明上面的 None 源于 CRC 而非解析失败）
+    let mut ok = b"MZ body 0123456789".to_vec();
+    ok.extend_from_slice(&encode_tail(payload.as_bytes()));
+    assert_eq!(extract_tail(&ok).unwrap(), c);
+  }
 
-    let a = sample();
-    write_tail(&f, &a).unwrap();
-    assert_eq!(read_tail_from(&f).unwrap().unwrap(), a);
+  #[test]
+  fn truncated_footer_classification() {
+    // 截断 v3 footer 的三种归口：
+    //  - 截 5 字节（恰好去掉 ver+crc）→ 剩余 24 字节恰是合法 v2 帧 → 兼容读回（配置完好）
+    //  - 其余 1..=13 字节（MAGIC 仍完整留在文件内）→ 判损坏
+    //  - ≥14 字节（MAGIC 自身被截断）→ 归入「无尾部」
+    let cfg = sample();
+    let payload = cfg.to_json();
+    let mut bytes = b"MZ body 0123456789".to_vec();
+    bytes.extend_from_slice(&encode_tail(payload.as_bytes()));
+    let dir = std::env::temp_dir().join("web2app_tail_tests");
+    fs::create_dir_all(&dir).unwrap();
 
-    let b = AppConfig::new("https://other.io".into(), "B".into(), None);
-    write_tail(&f, &b).unwrap();
-    assert_eq!(read_tail_from(&f).unwrap().unwrap(), b);
+    for cut in 1..=13 {
+      let truncated = &bytes[..bytes.len() - cut];
+      let f = dir.join(format!("trunc_{cut}.bin"));
+      fs::write(&f, truncated).unwrap();
+      if cut == 5 {
+        // v3 的前 24 字节 == 合法 v2 帧，故此截断按 v2 兼容路径读回同一配置
+        assert_eq!(extract_tail(truncated).unwrap(), cfg, "cut={cut} 应按 v2 兼容读回");
+        assert_eq!(read_tail_from(&f).unwrap().unwrap(), cfg);
+      } else {
+        assert!(extract_tail(truncated).is_none(), "cut={cut} 应判损坏");
+        assert!(read_tail_from(&f).is_err(), "cut={cut} 磁盘读应报错");
+      }
+    }
+    // MAGIC 自身被截断 → 收不到 → 无尾部
+    assert!(extract_tail(&bytes[..bytes.len() - 20]).is_none());
+  }
 
-    // 裸程序主体未被破坏
-    let raw = fs::read(&f).unwrap();
-    assert!(raw.starts_with(b"MZ base program"));
-    assert!(strip_tail(&raw).len() < raw.len());
+  /// 窗口读与「全量读 + 内存解析」的分类必须逐一相同（守护两条读路径不漂移）。
+  #[test]
+  fn read_tail_from_matches_in_memory_parser_on_corpus() {
+    #[derive(PartialEq, Debug)]
+    enum Cls {
+      None,
+      Some(String),
+      Corrupt,
+    }
+
+    let classify_mem = |b: &[u8]| -> Cls {
+      match classify(b) {
+        Frame::Valid { start, len, .. } => std::str::from_utf8(&b[start..start + len])
+          .ok()
+          .and_then(AppConfig::from_json)
+          .map(|c| Cls::Some(c.to_json()))
+          .unwrap_or(Cls::Corrupt),
+        Frame::Corrupt => Cls::Corrupt,
+        Frame::Absent => Cls::None,
+      }
+    };
+
+    let p1 = AppConfig::new("https://a.com/x".into(), "A".into(), None).to_json();
+    let p2 =
+      AppConfig::new("https://b.com/?q=\"y\"".into(), "B".into(), Some(vec![0, 1, 2, 255])).to_json();
+    let base = || b"MZ fake exe body .......................".to_vec();
+    let base_len = base().len();
+
+    let mut corpus: Vec<Vec<u8>> = Vec::new();
+    // 合法 v3（含图标）/ v2 / 无尾 / 空 / 极小
+    let full1 = {
+      let mut b = base();
+      b.extend_from_slice(&encode_tail(p1.as_bytes()));
+      b
+    };
+    corpus.push(full1.clone());
+    {
+      let mut b = base();
+      b.extend_from_slice(&encode_tail(p2.as_bytes()));
+      corpus.push(b);
+    }
+    {
+      let mut b = base();
+      b.extend_from_slice(p1.as_bytes());
+      b.extend_from_slice(TAIL_MAGIC);
+      b.extend_from_slice(&(p1.len() as u64).to_le_bytes());
+      corpus.push(b);
+    }
+    corpus.push(base());
+    corpus.push(Vec::new());
+    for n in 0..40usize {
+      corpus.push(vec![0xAB; n]);
+    }
+    // v3 逐截断
+    for cut in 0..=full1.len() {
+      corpus.push(full1[..full1.len() - cut].to_vec());
+    }
+    // CRC / ver / payload 篡改
+    {
+      let mut t = full1.clone();
+      let l = t.len();
+      t[l - 1] ^= 0xFF;
+      corpus.push(t);
+    }
+    {
+      let mut t = full1.clone();
+      let l = t.len();
+      t[l - 5] ^= 0x01; // ver 字节
+      corpus.push(t);
+    }
+    {
+      let mut t = full1.clone();
+      t[base_len + 2] ^= 0xFF; // payload 字节
+      corpus.push(t);
+    }
+    // 正文伪魔数 + 合法尾
+    {
+      let mut t = b"MZ __WEB2APP_TAIL__ body".to_vec();
+      t.extend_from_slice(p1.as_bytes());
+      t.extend_from_slice(TAIL_MAGIC);
+      t.extend_from_slice(&(p1.len() as u64).to_le_bytes());
+      corpus.push(t);
+    }
+    // 长度字段篡改（v2 形态：含 0 / 极小 / 越界 / u64 极值）
+    for lv in [0u64, 1, 23, 24, 25, u64::MAX, u64::MAX - 1, 1 << 40] {
+      let mut t = base();
+      t.extend_from_slice(p1.as_bytes());
+      t.extend_from_slice(TAIL_MAGIC);
+      t.extend_from_slice(&lv.to_le_bytes());
+      corpus.push(t);
+    }
+    // 确定性 LCG 随机字节
+    let mut seed: u64 = 0x1234_5678_9abc_def0;
+    for _ in 0..200 {
+      seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+      let len = (seed >> 20) as usize % 300;
+      corpus.push((0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add((seed >> 8) as u8)).collect());
+    }
+
+    let dir = std::env::temp_dir().join("web2app_tail_corpus");
+    fs::create_dir_all(&dir).unwrap();
+    for (i, bytes) in corpus.iter().enumerate() {
+      let f = dir.join(format!("c{i}.bin"));
+      fs::write(&f, bytes).unwrap();
+      let disk = match read_tail_from(&f) {
+        Ok(None) => Cls::None,
+        Ok(Some(c)) => Cls::Some(c.to_json()),
+        Err(_) => Cls::Corrupt,
+      };
+      assert_eq!(disk, classify_mem(bytes), "分类漂移 @ {i} (len={})", bytes.len());
+    }
   }
 
   #[test]

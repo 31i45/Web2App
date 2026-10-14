@@ -55,11 +55,12 @@ Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定�
 v2 采用三 crate workspace 结构，实现「子应用结构性不可繁殖」与「单文件产物」的双重约束：
 
 ```
-tail-core/        # 共享层：尾部协议、PNG 解码、URL 工具、致命错误呈现（零 tao/wry 依赖）
-├── src/lib.rs    #   AppConfig / read_tail / write_tail / decode_png / resize_box / sanitize_host / host_of / url_fingerprint
-child/           # 子应用运行时（用户分发的精简产物，~670KB）
+tail-core/        # 共享层：尾部协议解析与编码、PNG 解码、URL 工具、致命错误呈现（零 tao/wry 依赖）
+├── src/lib.rs    #   AppConfig / read_tail / encode_tail / strip_tail / decode_png / resize_box / sanitize_host / host_of / url_fingerprint
+child/           # 子应用运行时（用户分发的精简产物，~700KB）
 ├── build.rs     #   winres 编译 w2a.ico 进 .rsrc（文件图标默认值）
 ├── src/main.rs  #   读尾部配置 → 打开 WebView；无配置 → 报错（不可直接运行）
+├── src/accelerator.rs # 宿主层 Alt+Home（WebView2 AcceleratorKeyPressed，跨源 iframe 焦点下兜底）
 ├── src/icon.rs  #   用户 PNG → tao 窗口图标（用 tail_core::decode_png）
 ├── src/popup.rs #   新窗口路由（同站就地 / 跨站交系统 / 弹窗建独立原生窗 / 伪协议忽略）
 └── src/webview.rs # WebView2 窗口构建（数据目录 LOCALAPPDATA\Web2App\apps\<host>_<指纹>）
@@ -68,9 +69,11 @@ master/          # 打包器（编译期内嵌 child 模板，~1.5MB）
 ├── src/main.rs  #   表单窗口 + 打包调度
 ├── src/ui.rs    #   内嵌 HTML 表单 + IPC 解析
 ├── src/builder.rs #  CHILD_TEMPLATE + pack（模板 → 注入图标 → 追加尾部 → 签名）
+├── src/tail_write.rs # 尾部写入（自 tail-core 外迁：写尾能力不进 child 依赖图，编译期不可繁殖）
 ├── src/winicon.rs # PNG→ICO + UpdateResource 注入 .rsrc（用户自定义文件图标）
 ├── src/icon.rs  #   母版窗口图标（与 child 同构，master 不依赖 child crate）
 └── src/sign.rs  #   可选 signtool 签名 hook（非阻塞）
+audit.ps1        # 结构性不可繁殖静态审计（CI 门禁：字符串标记 / PE 映像数 / cargo tree 依赖边界）
 assets/
 ├── w2a.ico      # w2a 文件图标源（winres 编译进 child.exe）
 └── logo_256.png # w2a 窗口图标源（include_bytes 内嵌进 child + master）
@@ -78,15 +81,16 @@ assets/
 
 ### 为什么是两个二进制？
 
-- **child**：精简运行时，用户分发的产物。无打包器代码 → 结构性不可繁殖（无法通过补丁删除命令行参数等方式获得打包能力）。
+- **child**：精简运行时，用户分发的产物。无打包器代码 → 结构性不可繁殖（无法通过补丁删除命令行参数等方式获得打包能力）。写尾能力（`write_tail`）物理隔离在 master 内——child 的依赖图中不含任何写尾代码，这是**编译期结构性保证**，不依赖 release 优化器剔除。
 - **master**：打包器，编译期内嵌 child 模板（`include_bytes!(env!("CHILD_BIN_PATH"))`）。用户下载 master → 填表 → 打包 → 得到 child 产物。
 
-两者通过 `tail-core` 共享尾部协议、PNG 工具与 URL 工具，避免重复代码。
+两者通过 `tail-core` 共享尾部协议、PNG 工具与 URL 工具，避免重复代码。`audit.ps1` 在 CI 中机械守护该边界（字符串标记扫描 + PE 映像计数 + `cargo tree` 依赖断言）。
 
 ### 尾部协议
 
-产物 = child 模板 + 尾部配置。尾部格式：`<payload JSON> <MAGIC:16B> <len:u64 LE>`。
-从文件末尾倒数 24 字节定位，天然支持覆盖旧配置。JSON 手写转义，零 serde 依赖。
+产物 = child 模板 + 尾部配置。尾部帧格式（v3）：
+`<payload JSON> <MAGIC:16B> <len:u64 LE> <ver:u8> <crc32:u32 LE>`，footer 共 29 字节。
+CRC32（IEEE 802.3）覆盖 payload + 长度 + 版本字节，尾部被截断或篡改时产物明确报「文件可能已损坏」而非静默错跑；旧版 v2 帧（24 字节，无 CRC）仍可读，剥离旧尾按结构切片进行——损坏帧亦剥离，重复打包体积稳定不膨胀。JSON 手写转义，零 serde 依赖。
 
 ### 图标机制（两条通道）
 
@@ -121,7 +125,7 @@ wry 默认关闭了一批 WebView2 原生特性，产物按「桌面浏览器等
 - **新窗口请求路由**（`child/src/popup.rs`）：`target=_blank` / `window.open` 原先被 WebView2 静默丢弃——这正是部分站点「链接点了没反应」的根因。现按 `classify_new_window` 四向分流：空白窗（`window.open()` 无 URL）与带尺寸/位置特征的 `window.open` 在应用内建独立原生窗口（共享发起方 WebView2 环境，OAuth 等会话得以延续）；同站（含互为子域）就地导航；跨站普通链接交系统默认程序；`blob:`/`data:`/`javascript:` 等浏览器内部伪协议忽略（外发无处理器、内载不可靠）。
 - **HTML5 全屏**：注入脚本监听 `fullscreenchange` 上报，由宿主窗口 `set_fullscreen` 完成真全屏（WebView2 内部全屏只填满 webview，并非真全屏）。弹窗对等具备该能力（Win32 原生切换窗口样式）。
 - **导航与缩放热键**：`with_hotkeys_zoom` / `with_back_forward_navigation_gestures`（触摸板横扫）。WebView2 的浏览器快捷键保持默认开启，故 **Alt+←/→ 后退/前进、鼠标侧键** 均原样生效；历史栈完整，可连续回退。
-- **回首页**：Alt+Home 回到打包时配置的起始 URL（WebView2 无「主页」概念，由注入脚本补上）。判定经 `URL` 规范化比较（含 `hash`），已在首页不重复导航；历史中存在首页条目时经 Navigation API `traverseTo` 回跳、命中 BFCache 瞬时生效，否则回落整页导航；另加在途守卫避免连按重启导航。只注册在最顶层帧——焦点落在跨源 iframe 内时收不到按键，属已知边界。主窗口与弹窗共用同一首页。
+- **回首页**：Alt+Home 回到打包时配置的起始 URL（WebView2 无「主页」概念，由注入脚本补上）。双层送达：页面层 `keydown`（含判定、BFCache 回跳、在途守卫）+ 宿主层 `AcceleratorKeyPressed`（`webview2-com` 直连，按键送达内容层之前回调）——焦点落在跨源 iframe 内时页面层收不到按键，由宿主层兜底送达，两层以 200ms 时间戳去重。判定经 `URL` 规范化比较（含 `hash`），已在首页不重复导航；历史中存在首页条目时经 Navigation API `traverseTo` 回跳、命中 BFCache 瞬时生效，否则回落整页导航。只注册在最顶层帧；主窗口与弹窗共用同一首页。
 - **剪贴板读取**：`with_clipboard(true)`（WebView2 默认关闭）。取值是「全局放行任意站点读取」——wry 的权限回调不携带请求 origin，无法按站点收敛，未收敛会牺牲「粘贴」类交互；此为已知边界。
 - **下载**：保持 WebView2 原生下载面板与落点（不注册「开始下载」处理器，一注册即会关掉原生面板），仅在页面内补一条「下载完成 / 下载失败」轻提示。
 - **标题同步**：页面 `document.title` 变化回流主循环——主窗口保留用户配置的品牌标题，弹窗（无配置标题）跟随文档标题。
@@ -172,11 +176,13 @@ Web2App 的核心价值（单文件、自定义图标、零依赖）在 Windows 
 ## 开发
 
 ```powershell
-cargo test --workspace    # 73 个单元测试（tail-core 39 + child 16 + master 18）
+cargo test --workspace    # 83 个单元测试（tail-core 44 + child 18 + master 21）
+.\build.ps1               # 一键发布构建（child → 测试 → clippy → master → 装配）
+.\audit.ps1               # 结构性不可繁殖静态审计（CI 同款门禁：字符串标记 / PE 映像数 / cargo tree）
 .\e2e.ps1                 # 端到端：身份/资源元数据、产物启动、零残留、裸模板不可运行、字节级模板一致性
 cargo clippy --workspace --all-targets -- -D warnings   # 零告警门禁（build.ps1 已含）
 cargo build -p child --release   # 构建 child（master 的前置依赖）
 cargo build -p master --release  # 构建 master（内嵌 child 模板）
 ```
 
-依赖：`wry 0.57`（default-features=false, features=devtools）、`tao 0.37`、`png 0.18`、`windows-sys 0.59`；构建期 `winres`（仅 Windows，不进运行时）。JSON/base64 手写，零 serde。
+依赖：`wry 0.57`（default-features=false, features=devtools）、`tao 0.37`、`webview2-com 0.39`（宿主层 Alt+Home，版本对齐 wry 传递依赖）、`png 0.18`、`windows-sys 0.59`；构建期 `winres`（仅 Windows，不进运行时）。JSON/base64/CRC32 手写，零 serde。

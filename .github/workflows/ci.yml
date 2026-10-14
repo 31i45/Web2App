@@ -59,6 +59,11 @@ jobs:
           if [ "$child" -gt 1048576 ]; then echo "::error::child exceeds 1MB promise ($child)"; exit 1; fi
           if [ "$master" -gt 2097152 ]; then echo "::error::web2app exceeds 2MB target ($master)"; exit 1; fi
 
+      # 结构性不可繁殖：child 产物不含写资源/签名/打包能力，且依赖图不含 master。
+      - name: Structural non-reproduction audit
+        shell: pwsh
+        run: ./audit.ps1 -ChildPath target/release/child.exe -MasterPath dist/web2app.exe
+
   # 发布（仅 v* 标签）：Windows 单目标
   build:
     name: build (windows)
