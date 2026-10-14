@@ -17,8 +17,8 @@ use wry::{WebContext, WebView};
 /// `config` 提供目标 URL、标题与可选用户图标（设为窗口图标）。
 /// 用户选图 → 设为窗口图标；未选图 → 回落内嵌 w2a 默认图标
 /// （Windows 窗口类图标不自动读 exe 资源节，须显式设置）。
-/// 构建失败返回 Err（如 Windows 缺 WebView2 运行时）——由调用方决定
-/// 如何呈现给用户（机制不预设死亡策略）。
+/// 构建失败（窗口或 WebView）返回 Err——如 Windows 缺 WebView2 运行时、
+/// 窗口创建失败等——由调用方决定如何呈现给用户（机制不预设死亡策略）。
 pub fn open_webview(config: AppConfig) -> Result<(), String> {
   let event_loop: tao::event_loop::EventLoop<()> = tao::event_loop::EventLoop::new();
   let icon = config
@@ -26,7 +26,7 @@ pub fn open_webview(config: AppConfig) -> Result<(), String> {
     .as_deref()
     .and_then(crate::icon::window_icon)
     .or_else(crate::icon::default_window_icon);
-  let window = build_window(&event_loop, &config.title, Theme::Dark, icon);
+  let window = build_window(&event_loop, &config.title, Theme::Dark, icon)?;
   // 关闭哨兵必须在 WebView 构建（wry 挂接 subclass）之前安装，见 tail_core 文档。
   tail_core::arm_close_watchdog(tao::platform::windows::WindowExtWindows::hwnd(&window));
   // WebContext 需存活至事件循环结束（数据目录指向系统应用数据区，不污染 exe 目录）
@@ -54,12 +54,14 @@ pub fn open_webview(config: AppConfig) -> Result<(), String> {
 
 /// 构建原生窗口（深色标题栏）。
 /// `icon`：窗口图标（None = 不设，Windows 下显示系统默认）。
+/// 构建失败返回 Err——与 `build_webview` 一致，由调用方决定呈现方式；
+/// 不在此 panic（release 为 GUI 子系统 + panic=abort，panic 即静默死亡）。
 pub fn build_window(
   event_loop: &tao::event_loop::EventLoop<()>,
   title: &str,
   theme: Theme,
   icon: Option<Icon>,
-) -> Window {
+) -> Result<Window, String> {
   let mut builder = WindowBuilder::new()
     .with_title(title)
     .with_theme(Some(theme))
@@ -68,7 +70,7 @@ pub fn build_window(
   if let Some(ic) = icon {
     builder = builder.with_window_icon(Some(ic));
   }
-  builder.build(event_loop).expect("create window")
+  builder.build(event_loop).map_err(|e| format!("创建窗口失败：{e}"))
 }
 
 /// 构建 WebView（产物形态：加载目标 URL）。devtools 仅 debug 构建启用（release 零开销）。

@@ -37,7 +37,10 @@ fn run_master() {
 
   // 母版窗口图标：内嵌 w2a（Windows 窗口类图标不自动读 exe 资源节，须显式设置）
   let icon = icon::default_window_icon();
-  let window = build_master_window(&event_loop, "Web2App 打包器", Theme::Dark, icon);
+  let window = match build_master_window(&event_loop, "Web2App 打包器", Theme::Dark, icon) {
+    Ok(w) => w,
+    Err(e) => tail_core::show_fatal_and_exit(&e),
+  };
   // 关闭哨兵必须在 WebView 构建（wry 挂接 subclass）之前安装，见 tail_core 文档。
   tail_core::arm_close_watchdog(tao::platform::windows::WindowExtWindows::hwnd(&window));
   let mut context = WebContext::new(Some(ui::master_data_dir()));
@@ -82,12 +85,14 @@ fn run_master() {
 }
 
 /// 构建母版窗口（深色标题栏）。
+/// 构建失败返回 Err——与紧随其后的 WebView 构建失败同一策略，由调用方
+/// 经 `show_fatal_and_exit` 呈现；不在此 panic（GUI 子系统 + panic=abort 即静默死亡）。
 fn build_master_window(
   event_loop: &tao::event_loop::EventLoop<FormEvent>,
   title: &str,
   theme: Theme,
   icon: Option<tao::window::Icon>,
-) -> tao::window::Window {
+) -> Result<tao::window::Window, String> {
   let mut builder = tao::window::WindowBuilder::new()
     .with_title(title)
     .with_theme(Some(theme))
@@ -96,7 +101,7 @@ fn build_master_window(
   if let Some(ic) = icon {
     builder = builder.with_window_icon(Some(ic));
   }
-  builder.build(event_loop).expect("create window")
+  builder.build(event_loop).map_err(|e| format!("创建母版窗口失败：{e}"))
 }
 
 /// 母版运行时状态（窗口存活期持有）。
