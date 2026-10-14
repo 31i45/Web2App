@@ -10,6 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod icon;
+mod popup;
 mod webview;
 
 fn main() {

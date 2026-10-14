@@ -9,6 +9,8 @@
 //! 任何引用窗口/WebView 类的代码不得引入此处（避免 child 产物体积膨胀）。
 //! 窗口图标转换在 child/icon.rs（依赖 tao::window::Icon），此处只到像素字节为止。
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -244,14 +246,48 @@ fn unescape(s: &str) -> String {
       Some('\\') => out.push('\\'),
       Some('u') => {
         let hex: String = chars.by_ref().take(4).collect();
-        if let Some(n) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-          out.push(n);
+        match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+          Some(n) => out.push(n),
+          // 非法/不完整转义（非 hex，或孤立代理 \uD800）原样保留，避免静默丢字符。
+          None => {
+            out.push('\\');
+            out.push('u');
+            out.push_str(&hex);
+          }
         }
       }
       Some(other) => out.push(other),
       None => {}
     }
   }
+  out
+}
+
+// ============================================================================
+// 字符串 → JS 字面量（转义单点：child 注入脚本与 master 状态回写共用）
+// ============================================================================
+
+/// Rust 字符串 → JS 字符串字面量（含定界引号）。
+///
+/// 非 ASCII 原样输出（WebView2 的 JS 引擎按 UTF-8 解码注入源文本）。
+/// 转义 `"` `\` 与全部控制字符，以及 U+2028/2029——后者是 JS 行终止符，
+/// 直接放进字符串字面量会截断语句。
+pub fn js_string_literal(s: &str) -> String {
+  let mut out = String::with_capacity(s.len() + 2);
+  out.push('"');
+  for c in s.chars() {
+    match c {
+      '"' => out.push_str("\\\""),
+      '\\' => out.push_str("\\\\"),
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      '\u{2028}' | '\u{2029}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+      c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+      c => out.push(c),
+    }
+  }
+  out.push('"');
   out
 }
 
@@ -318,12 +354,17 @@ fn dims_within_limit(w: u32, h: u32) -> bool {
   u64::from(w) * u64::from(h) <= MAX_PIXELS
 }
 
-/// PNG → RGBA8（仅 RGB/RGBA 8bit，其余返回 None；尺寸超限返回 None）。
+/// PNG → RGBA8（仅 RGB/RGBA 且位深 8bit，其余返回 None；尺寸超限返回 None）。
 pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
   let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
   let mut reader = decoder.read_info().ok()?;
   // 炸弹防御：read_info 已解析 IHDR，在分配像素缓冲前拒绝超限画布
   if !dims_within_limit(reader.info().width, reader.info().height) {
+    return None;
+  }
+  // 位深必须为 8：png 解码器默认 Transformations::IDENTITY，16bit 不会自动降位深，
+  // 若放行则 buffer 呈 8 字节/像素，却被按 4 字节/像素 RGBA 返回（尺寸语义自相矛盾）。
+  if reader.info().bit_depth != png::BitDepth::Eight {
     return None;
   }
   let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
@@ -351,7 +392,8 @@ pub fn resize_box(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
   if dw == sw && dh == sh {
     return src.to_vec();
   }
-  let mut out = Vec::with_capacity((dw * dh * 4) as usize);
+  // u64 域运算后再截断为 usize：与 dims_within_limit 的溢出防御口径一致。
+  let mut out = Vec::with_capacity((u64::from(dw) * u64::from(dh) * 4) as usize);
   for y in 0..dh {
     let sy0 = y * sh / dh;
     let sy1 = ((y + 1) * sh / dh).max(sy0 + 1);
@@ -395,19 +437,90 @@ pub fn default_title(url: &str) -> String {
 }
 
 /// URL → host → 安全字符序列（单点持有：master 产物文件名与 child 数据目录共用）。
-/// 非 `[A-Za-z0-9.-]` 字符替换为下划线。
-/// 恰为 `..` / `.` 的段回落默认名：此类 host（仅手工伪造的尾部可产生）
-/// 会令数据目录上移或指向当前目录，构成路径遍历面。
+/// 非 `[A-Za-z0-9.-]` 字符替换为下划线。两类非法名被修正，否则写盘/建目录会失败：
+/// - 结尾的点/空格：Windows 静默剥除，令实际落盘名与预期不符 —— 先剥除；
+/// - `..` / `.`（路径遍历）与保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）——
+///   前者回落默认名，后者前置下划线破坏匹配（保留名判定取首个点之前的段，
+///   故 `con.com` 亦命中）。
 pub fn sanitize_host(url: &str) -> String {
   let s: String = default_title(url)
     .chars()
     .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
     .collect();
-  if s == ".." || s == "." {
-    "Web2App".to_string()
-  } else {
-    s
+  let s = s.trim_end_matches(['.', ' ']);
+  if s.is_empty() || s == ".." || s == "." {
+    return "Web2App".to_string();
   }
+  if is_reserved_device_name(s) {
+    return format!("_{s}");
+  }
+  s.to_string()
+}
+
+/// 是否为 Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，大小写不敏感）。
+/// 判定取首个点之前的段：`con.com` 的段为 `con`，属保留。
+fn is_reserved_device_name(s: &str) -> bool {
+  let base = s.split('.').next().unwrap_or(s).to_ascii_uppercase();
+  if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+    return true;
+  }
+  // COM/LPT 仅 1-9 为保留（COM0 合法）。
+  if let Some(n) = base.strip_prefix("COM").or_else(|| base.strip_prefix("LPT")) {
+    return matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9");
+  }
+  false
+}
+
+/// URL → host（去协议前缀、userinfo 与端口），无 host 时返回空串。
+///
+/// 仅按 `://host[:port][/path]` 的宽松语法切分，不做完整 URL 解析
+/// （尾部 payload 的 URL 由打包器产出，形态可控）。
+pub fn host_of(url: &str) -> String {
+  let rest = match url.split_once("://") {
+    Some((_, rest)) => rest,
+    // 无 scheme 定界（如 `mailto:` / 裸 host / 空串）不构成 `://host` 语法，无 host。
+    None => return String::new(),
+  };
+  let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+  let host_port = authority.rsplit('@').next().unwrap_or(authority);
+  let host = host_port.split(':').next().unwrap_or(host_port);
+  host.to_ascii_lowercase()
+}
+
+/// URL → 稳定短指纹（8 位十六进制，FNV-1a 64 截断为低 32 位）。
+///
+/// 用途：数据目录按「host + URL 指纹」分区——同一 host 下打包的多个不同应用
+/// （如 `https://a.com/x` 与 `https://a.com/y`）各自持有独立 profile，
+/// cookie/存储/缓存互不污染。同一 URL 的多次打包共享同一 profile。
+/// 片段标识（`#...`）不改变实际加载的页面，故先剥离再取指纹。
+pub fn url_fingerprint(url: &str) -> String {
+  let canonical = url.trim().split('#').next().unwrap_or("");
+  let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+  for b in canonical.as_bytes() {
+    h ^= u64::from(*b);
+    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+  }
+  format!("{:08x}", (h & 0xffff_ffff) as u32)
+}
+
+// ============================================================================
+// 应用数据目录（Windows-only；child 数据目录与 master 数据目录共用同一探测链）
+// ============================================================================
+
+/// 系统应用数据基目录探测：%LOCALAPPDATA% → 兜底 temp。
+///
+/// Windows 上 LOCALAPPDATA 几乎总存在；缺失（极端环境）回落 temp 保证不 panic。
+/// 单点持有：child 的 WebView 数据目录与 master 的数据目录共用本函数。
+pub fn data_base_dir() -> PathBuf {
+  std::env::var_os("LOCALAPPDATA")
+    .map(PathBuf::from)
+    .unwrap_or_else(std::env::temp_dir)
+}
+
+/// `<数据基目录>/Web2App/<sub>`：品牌目录与子系统名的拼接收敛于此，
+/// 保证 child（apps）与 master（master）落在同一棵树下，且互不污染 exe 目录。
+pub fn data_dir(sub: &str) -> PathBuf {
+  data_base_dir().join("Web2App").join(sub)
 }
 
 // ============================================================================
@@ -466,8 +579,15 @@ pub fn quit_watchdog() {
   });
 }
 
-/// 原窗口过程（tao 的），挂接哨兵时保存。单窗口进程故全局单值。
-static PREV_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+// 已武装窗口的「原窗口过程」注册表（hwnd → prev WNDPROC）。
+//
+// 按 hwnd 分槽而非全局单值：进程内可能存在多个窗口（主窗口 + 新窗口路由
+// 产生的弹窗），单槽会在第二次武装时覆盖前一个窗口的链尾，令其哨兵调用错
+// 窗口过程。窗口消息只在创建窗口的线程派发，故 thread_local 足够，
+// 无需全局锁与跨线程可见性。
+thread_local! {
+  static PREV_WNDPROCS: RefCell<HashMap<isize, isize>> = RefCell::new(HashMap::new());
+}
 
 /// 在窗口上安装关闭哨兵：替换窗口过程，捕获 WM_CLOSE 并武装 [`quit_watchdog()`]。
 ///
@@ -479,13 +599,12 @@ static PREV_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicI
 ///
 /// 本函数在 WNDPROC 层面捕获 WM_CLOSE——先于一切框架事件派发，不受消息泵
 /// 吞没影响——收到即武装看门狗（300ms 确定退出），随后无条件
-/// `CallWindowProcW` 透传给 tao 原过程，正常事件链完全不受影响。
+/// `CallWindowProcW` 透传给原过程，正常事件链完全不受影响。
 ///
 /// 调用约束：
 /// - 必须在**创建 WebView 之前**调用：wry 挂接其 subclass 时以当前 WNDPROC
 ///   为链尾，先挂哨兵可保证 wry 的 WM_SIZE/WM_SETFOCUS 等处理仍在链上。
 /// - 须在窗口所属线程调用（child/master 均在主线程窗口创建后立即调用）。
-/// - 面向单窗口进程设计（PREV_WNDPROC 为全局单值）。
 ///
 /// 无竞态：挂接发生在事件循环启动前、hwnd 尚未暴露给任何其他线程，
 /// 消息不可能在 store 原过程之前到达哨兵 proc。
@@ -494,6 +613,7 @@ pub fn arm_close_watchdog(hwnd: isize) {
   extern "system" {
     fn SetWindowLongPtrW(hwnd: isize, index: i32, new_value: isize) -> isize;
     fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
   }
   const GWLP_WNDPROC: i32 = -4;
   const WM_CLOSE: u32 = 0x0010;
@@ -507,8 +627,12 @@ pub fn arm_close_watchdog(hwnd: isize) {
     if msg == WM_CLOSE {
       quit_watchdog();
     }
-    let prev = PREV_WNDPROC.load(std::sync::atomic::Ordering::Acquire);
-    CallWindowProcW(prev, hwnd, msg, wparam, lparam)
+    let prev = PREV_WNDPROCS.with(|m| m.borrow().get(&hwnd).copied()).unwrap_or(0);
+    if prev == 0 {
+      // 未登记（武装失败或已被替换）：退化为默认处理，避免向空过程转发。
+      return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
+    unsafe { CallWindowProcW(prev, hwnd, msg, wparam, lparam) }
   }
 
   // SAFETY: hwnd 为调用方持有的有效窗口句柄。SetWindowLongPtrW 原子换入
@@ -517,12 +641,14 @@ pub fn arm_close_watchdog(hwnd: isize) {
   let prev =
     unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, close_watch_proc as *const () as isize) };
   if prev != 0 {
-    PREV_WNDPROC.store(prev, std::sync::atomic::Ordering::Release);
+    PREV_WNDPROCS.with(|m| {
+      m.borrow_mut().insert(hwnd, prev);
+    });
   }
 }
 
 // ============================================================================
-// 测试（30 个：tail 协议 20 + PNG/缩放 6 + URL 工具 4）
+// 测试（39 个：tail 协议 20 + PNG/缩放 6 + URL 工具 6 + 边界补充 7）
 // ============================================================================
 
 #[cfg(test)]
@@ -875,7 +1001,7 @@ mod tests {
     assert!(dims_within_limit(0, 0));
   }
 
-  // ---------- builder.rs URL 工具 测试（4 个） ----------
+  // ---------- builder.rs URL 工具 测试（6 个） ----------
 
   #[test]
   fn default_title_extracts_host() {
@@ -910,5 +1036,107 @@ mod tests {
     // 恰好是两个点以外的点形态不构成路径遍历（a..b / ... 均为普通目录名）
     assert_eq!(sanitize_host("https://a..b"), "a..b");
     assert_eq!(sanitize_host("https://...com"), "...com");
+  }
+
+  #[test]
+  fn host_of_strips_scheme_port_userinfo_and_path() {
+    assert_eq!(host_of("https://example.com/x?q=1#frag"), "example.com");
+    assert_eq!(host_of("http://a.b.org:8080/p"), "a.b.org");
+    assert_eq!(host_of("https://user:pw@Example.COM/p"), "example.com");
+    assert_eq!(host_of("mailto:x@y.com"), "");
+    assert_eq!(host_of(""), "");
+  }
+
+  #[test]
+  fn url_fingerprint_is_stable_and_distinguishes_urls() {
+    // 同输入 → 同输出（稳定）；格式恒为 8 位小写十六进制
+    let a = url_fingerprint("https://example.com");
+    assert_eq!(a, url_fingerprint("https://example.com"));
+    assert_eq!(a.len(), 8);
+    assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    // 同 host 不同路径 / 不同 query 必须区分（数据目录隔离的前提）
+    assert_ne!(a, url_fingerprint("https://example.com/other"));
+    assert_ne!(url_fingerprint("https://a.com/x?p=1"), url_fingerprint("https://a.com/x?p=2"));
+    // 首尾空白与片段不改变指纹（片段不影响实际加载的页面）
+    assert_eq!(url_fingerprint(" https://example.com/ "), url_fingerprint("https://example.com/#top"));
+  }
+
+  // ---------- 边界补充测试（7 个：路径 / 转义 / 位深 / 保留名 / 数据目录） ----------
+
+  #[test]
+  fn strip_verbatim_prefix_handles_win32_forms() {
+    // 驱动器号形态：\\?\C:\foo → C:\foo
+    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"\\?\C:\foo\bar")), PathBuf::from(r"C:\foo\bar"));
+    // UNC 形态：\\?\UNC\server\share → \\server\share
+    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\srv\share")), PathBuf::from(r"\\srv\share"));
+    // 无前缀：原样返回
+    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"C:\plain")), PathBuf::from(r"C:\plain"));
+    // 仅 `\\?\` 但既非驱动器也非 UNC：保守原样返回
+    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"\\?\weird")), PathBuf::from(r"\\?\weird"));
+  }
+
+  #[test]
+  fn read_tail_on_untailed_exe_is_none() {
+    // 测试进程自身的 exe 无尾部配置 → Ok(None)（覆盖 read_tail 走 current_exe 的真实 I/O 路径）
+    assert!(read_tail().unwrap().is_none());
+  }
+
+  #[test]
+  fn unescape_preserves_invalid_escapes() {
+    // 合法转义正常解码
+    assert_eq!(unescape(r"\u0041"), "A");
+    assert_eq!(unescape(r"a\nb"), "a\nb");
+    // 非法 hex：原样保留，不静默丢字符
+    assert_eq!(unescape(r"\uZZZZx"), r"\uZZZZx");
+    // 孤立代理（char::from_u32 失败）：原样保留
+    assert_eq!(unescape(r"\uD800"), r"\uD800");
+    // 未知转义（如 \q）：保留源字符本身
+    assert_eq!(unescape(r"\q"), "q");
+  }
+
+  #[test]
+  fn js_string_literal_escapes_literals() {
+    assert_eq!(js_string_literal("plain"), "\"plain\"");
+    assert_eq!(js_string_literal("a\"b"), "\"a\\\"b\"");
+    assert_eq!(js_string_literal("a\\b\n"), "\"a\\\\b\\n\"");
+    assert_eq!(js_string_literal("中"), "\"中\"");
+    // U+2028/2029 是 JS 行终止符，必须转义
+    assert_eq!(js_string_literal("\u{2028}"), "\"\\u2028\"");
+  }
+
+  #[test]
+  fn decode_png_rejects_sixteen_bit() {
+    // 16bit RGBA：png 解码器默认不降位深 → 必须拒绝（否则 buffer 呈 8 字节/像素，
+    // 却被按 4 字节/像素 RGBA 返回，尺寸语义自相矛盾）。
+    let mut out = Vec::new();
+    {
+      let mut enc = png::Encoder::new(&mut out, 2u32, 2u32);
+      enc.set_color(png::ColorType::Rgba);
+      enc.set_depth(png::BitDepth::Sixteen);
+      let mut w = enc.write_header().unwrap();
+      w.write_image_data(&[0u8; 2 * 2 * 4 * 2]).unwrap();
+    }
+    assert!(decode_png(&out).is_none());
+  }
+
+  #[test]
+  fn sanitize_host_avoids_reserved_device_names() {
+    // 保留设备名（判定取首个点之前的段）：前置下划线破坏匹配
+    assert_eq!(sanitize_host("https://con.com"), "_con.com");
+    assert_eq!(sanitize_host("https://nul"), "_nul");
+    assert_eq!(sanitize_host("https://COM1.dev"), "_COM1.dev");
+    assert_eq!(sanitize_host("https://lpt9.io"), "_lpt9.io");
+    // COM0 非保留
+    assert_eq!(sanitize_host("https://com0.org"), "com0.org");
+    // 结尾点（Windows 会静默剥除）：先剥除，落盘名与预期一致
+    assert_eq!(sanitize_host("https://example.com."), "example.com");
+  }
+
+  #[test]
+  fn data_dir_lives_under_brand_and_is_absolute() {
+    // 探测链不 panic 且返回绝对路径（LOCALAPPDATA 或 temp 均为绝对路径）
+    assert!(data_base_dir().is_absolute());
+    let s = data_dir("apps").to_string_lossy().replace('\\', "/");
+    assert!(s.ends_with("/Web2App/apps"), "got: {s}");
   }
 }

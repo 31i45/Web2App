@@ -9,7 +9,7 @@ Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定�
 从 [Releases](https://github.com/31i45/Web2App/releases) 下载 `web2app.exe`（CI 构建，附 SHA256SUMS 校验），或本地构建：
 
 ```powershell
-.\build.ps1          # 一键构建（child → 测试 → master → 装配）
+.\build.ps1          # 一键构建（child → 测试 → clippy → master → 装配）
 .\dist\web2app.exe  # 运行打包器
 ```
 
@@ -44,7 +44,7 @@ Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定�
 
 | 指标 | 目标 | 实测 |
 |---|---|---|
-| child 体积（用户分发的产物） | < 1 MB | ~670 KB（随工具链微漂移） |
+| child 体积（用户分发的产物） | < 1 MB | ~700 KB（随工具链微漂移） |
 | master 体积（打包器） | < 2 MB | ~1.5 MB（内嵌 child 模板） |
 | 冷启动 | < 2 s | 秒级（经验值，无自动化基准） |
 | 关闭残留 | 无 | 进程/WebView2 子进程全部退出 |
@@ -56,12 +56,13 @@ v2 采用三 crate workspace 结构，实现「子应用结构性不可繁殖」
 
 ```
 tail-core/        # 共享层：尾部协议、PNG 解码、URL 工具、致命错误呈现（零 tao/wry 依赖）
-├── src/lib.rs    #   AppConfig / read_tail / write_tail / decode_png / resize_box / sanitize_host
+├── src/lib.rs    #   AppConfig / read_tail / write_tail / decode_png / resize_box / sanitize_host / host_of / url_fingerprint
 child/           # 子应用运行时（用户分发的精简产物，~670KB）
 ├── build.rs     #   winres 编译 w2a.ico 进 .rsrc（文件图标默认值）
 ├── src/main.rs  #   读尾部配置 → 打开 WebView；无配置 → 报错（不可直接运行）
 ├── src/icon.rs  #   用户 PNG → tao 窗口图标（用 tail_core::decode_png）
-└── src/webview.rs # WebView2 窗口构建（数据目录 LOCALAPPDATA）
+├── src/popup.rs #   新窗口路由（同站就地 / 跨站交系统 / 弹窗建独立原生窗 / 伪协议忽略）
+└── src/webview.rs # WebView2 窗口构建（数据目录 LOCALAPPDATA\Web2App\apps\<host>_<指纹>）
 master/          # 打包器（编译期内嵌 child 模板，~1.5MB）
 ├── build.rs     #   定位 child.exe（OUT_DIR 上溯，兼容 --target）→ 拷贝内嵌；winres w2a 图标+身份
 ├── src/main.rs  #   表单窗口 + 打包调度
@@ -113,6 +114,21 @@ v2 采用两层确定性兜底：
 
 鼠标点 X 因伴随消息风暴通常无感；但「关闭即退出、零残留」不依赖运气。
 
+### 宿主侧能力
+
+wry 默认关闭了一批 WebView2 原生特性，产物按「桌面浏览器等效体验」逐项补齐，全部零新增 crate：
+
+- **新窗口请求路由**（`child/src/popup.rs`）：`target=_blank` / `window.open` 原先被 WebView2 静默丢弃——这正是部分站点「链接点了没反应」的根因。现按 `classify_new_window` 四向分流：空白窗（`window.open()` 无 URL）与带尺寸/位置特征的 `window.open` 在应用内建独立原生窗口（共享发起方 WebView2 环境，OAuth 等会话得以延续）；同站（含互为子域）就地导航；跨站普通链接交系统默认程序；`blob:`/`data:`/`javascript:` 等浏览器内部伪协议忽略（外发无处理器、内载不可靠）。
+- **HTML5 全屏**：注入脚本监听 `fullscreenchange` 上报，由宿主窗口 `set_fullscreen` 完成真全屏（WebView2 内部全屏只填满 webview，并非真全屏）。弹窗对等具备该能力（Win32 原生切换窗口样式）。
+- **导航与缩放热键**：`with_hotkeys_zoom` / `with_back_forward_navigation_gestures`（触摸板横扫）。WebView2 的浏览器快捷键保持默认开启，故 **Alt+←/→ 后退/前进、鼠标侧键** 均原样生效；历史栈完整，可连续回退。
+- **回首页**：Alt+Home 回到打包时配置的起始 URL（WebView2 无「主页」概念，由注入脚本补上；只注册在最顶层帧，且已在首页时不重复导航）。主窗口与弹窗共用同一首页。
+- **剪贴板读取**：`with_clipboard(true)`（WebView2 默认关闭）。取值是「全局放行任意站点读取」——wry 的权限回调不携带请求 origin，无法按站点收敛，未收敛会牺牲「粘贴」类交互；此为已知边界。
+- **下载**：保持 WebView2 原生下载面板与落点（不注册「开始下载」处理器，一注册即会关掉原生面板），仅在页面内补一条「下载完成 / 下载失败」轻提示。
+- **标题同步**：页面 `document.title` 变化回流主循环——主窗口保留用户配置的品牌标题，弹窗（无配置标题）跟随文档标题。
+- **`window.close` 守卫**：页面脚本对顶层窗口的 `window.close()` 调用被降级为无操作（浏览器对「非脚本打开的顶层窗」同样忽略，此处对齐该语义）；弹窗的 `window.close()` 仍正常关窗。
+- **主题跟随系统**：页面配色（`prefers-color-scheme`）与窗口标题栏均跟随系统深浅色，与浏览器一致。
+- **profile 隔离**：数据目录为 `%LOCALAPPDATA%\Web2App\apps\<host>_<URL 指纹>`——同一 host 下的不同应用 profile 相互隔离（cookie/存储/缓存不互污），同一 URL 的多次打包共享同一 profile。
+
 ## 平台策略
 
 v2 转向 **Windows-only** 长期商用，Linux/macOS 平台不再维护。社区可基于 v1 自行 fork 移植。
@@ -156,8 +172,9 @@ Web2App 的核心价值（单文件、自定义图标、零依赖）在 Windows 
 ## 开发
 
 ```powershell
-cargo test --workspace    # 54 个单元测试（tail-core 30 + child 6 + master 18）
+cargo test --workspace    # 72 个单元测试（tail-core 39 + child 15 + master 18）
 .\e2e.ps1                 # 端到端：身份/资源元数据、产物启动、零残留、裸模板不可运行、字节级模板一致性
+cargo clippy --workspace --all-targets -- -D warnings   # 零告警门禁（build.ps1 已含）
 cargo build -p child --release   # 构建 child（master 的前置依赖）
 cargo build -p master --release  # 构建 master（内嵌 child 模板）
 ```

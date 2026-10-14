@@ -5,11 +5,9 @@
 //! 图片字节经 base64 由 IPC 传给原生，无需绝对路径。
 
 /// 母版 WebView 数据目录（固定名，不打扰任何 exe 目录）。
+/// 基目录探测单点持有在 `tail_core::data_base_dir`（与 child 共用同一探测链）。
 pub fn master_data_dir() -> std::path::PathBuf {
-  let base = std::env::var_os("LOCALAPPDATA")
-    .map(std::path::PathBuf::from)
-    .unwrap_or_else(std::env::temp_dir);
-  base.join("Web2App").join("master")
+  tail_core::data_dir("master")
 }
 
 /// 母版表单页 HTML（纯静态）。全部样式内联，无网络请求、无外部依赖。
@@ -157,7 +155,6 @@ mod tests {
     assert!(h.contains("2 * 1024 * 1024"));
     // 打包期间按钮禁用（防重复提交）
     assert!(h.contains("disabled = true"));
-    assert!(h.contains("disabled"));
   }
 
   #[test]

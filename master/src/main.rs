@@ -146,9 +146,9 @@ impl Master {
   fn set_status(&mut self, text: &str, ok: bool) {
     if let Some(w) = self.webview.as_ref() {
       let js = format!(
-        "(()=>{{const s=document.getElementById('status');if(s){{s.textContent={:?};s.style.color={:?};}}const b=document.getElementById('pack');if(b){{b.disabled=false;}}}})();",
-        text,
-        if ok { "#7ee0a3" } else { "#ff8f8f" }
+        "(()=>{{const s=document.getElementById('status');if(s){{s.textContent={};s.style.color={};}}const b=document.getElementById('pack');if(b){{b.disabled=false;}}}})();",
+        tail_core::js_string_literal(text),
+        tail_core::js_string_literal(if ok { "#7ee0a3" } else { "#ff8f8f" })
       );
       if let Err(e) = w.evaluate_script(&js) {
         eprintln!("状态回写失败: {e}");

@@ -46,7 +46,7 @@ jobs:
 
       # build.ps1 保证顺序：child 先于 master（master 编译期内嵌 child.exe）
       - name: Release build (child -> master -> assemble)
-        run: ./build.ps1 -SkipTests
+        run: ./build.ps1 -SkipTests -SkipClippy
 
       - name: Size red lines (child < 1MB, web2app < 2MB)
         shell: bash

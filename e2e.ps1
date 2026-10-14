@@ -138,7 +138,7 @@ try {
   Start-Sleep -Seconds 1
   Assert (-not $proc.HasExited) "product host alive"
   Assert $wvOk "msedgewebview2 rendering with scoped data dir"
-  Assert (Test-Path "$env:LOCALAPPDATA\Web2App\apps\example.com") "data dir in LOCALAPPDATA (exe dir untouched)"
+  Assert (Test-Path "$env:LOCALAPPDATA\Web2App\apps\example.com_*") "data dir in LOCALAPPDATA (exe dir untouched)"
 
   # ---- 4. 零残留 ----
   Write-Host "`n[3] zero residue after close"
