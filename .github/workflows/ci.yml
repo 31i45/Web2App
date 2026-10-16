@@ -86,7 +86,7 @@ jobs:
       - name: Install WebKitGTK dev libraries + e2e prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev xvfb xdotool gstreamer1.0-libav
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev xvfb xdotool gstreamer1.0-libav gstreamer1.0-plugins-bad dbus-x11 at-spi2-core
 
       # 两阶段构建同 Windows：master 编译期内嵌 child（Linux 产物名为 child，无 .exe）。
       - name: Build child (debug; test/clippy 的前提)
@@ -112,7 +112,11 @@ jobs:
 
       # G-1：无头门禁（脚本自带 Xvfb 起停；全部以 exit code 判定）
       - name: E2E gate (headless Xvfb)
-        run: CHILD=target/release/child MASTER=target/release/web2app bash e2e.sh
+        env:
+          NO_AT_BRIDGE: 1
+          WEBKIT_DISABLE_DMABUF_RENDERER: 1
+        run: |
+          dbus-run-session -- bash -c 'CHILD=target/release/child MASTER=target/release/web2app bash e2e.sh'
 
   # 发布（仅 v* 标签）：Windows 单目标
   build:
