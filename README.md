@@ -4,6 +4,10 @@ Web→桌面应用打包器。输入网页 URL（可选自定义图标），生�
 
 受开源项目 https://github.com/tw93/Pake 和小暖科技的 SiteNative 项目启发，但绝对是全网最轻最小最原生的 Web→桌面应用打包器。
 
+| Windows | Linux |
+|---|---|
+| ![Windows](assets/screenshot_windows.png) | ![Linux](assets/screenshot_linux.png) |
+
 ## 快速开始
 
 **Windows**：从 [Releases](https://github.com/31i45/Web2App/releases) 下载 `web2app.exe`（CI 构建，附 SHA256SUMS 校验），或本地构建：
