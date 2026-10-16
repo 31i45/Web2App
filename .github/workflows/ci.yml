@@ -71,9 +71,12 @@ jobs:
   # 隔离 / deb 打包安装运行卸载）。wry 的 Linux 后端经 pkg-config 链接系统
   # WebKitGTK/GTK → 必须装开发库；e2e 另需 Xvfb/xdotool，以及 control Depends 的
   # 运行库（e2e 用 `dpkg -i` 直装，不解析依赖，故显式预装）。
+  # 基线钉在 ubuntu-22.04（glibc 2.35）：ubuntu-latest（24.04）构建出的二进制带
+  # GLIBC_2.39 weak 引用，在 jammy 系目标系统（Zorin 17 / 国产桌面 OS）上每次启动
+  # 都刷 `weak version GLIBC_2.39 not found` 警告。22.04 构建产物在 22.04+ 全系可跑。
   verify-linux:
     name: verify (ubuntu)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -158,12 +161,13 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # Linux 发布：打包器自身的 .deb（用户 apt install 后即得 GUI 打包器）
+  # Linux 发布：打包器自身的 .deb（用户 apt install 后即得 GUI 打包器）。
+  # 同样钉 ubuntu-22.04——发布产物的 glibc 基线（见 verify-linux 注释）。
   build-linux:
     name: build (linux)
     needs: verify-linux
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -181,55 +185,22 @@ jobs:
           cargo build -p child --release --locked
           cargo build --workspace --release --locked
 
-      - name: Create .deb package of web2app packager
+      # master 分发形态跨平台对称：Windows 裸 exe / Linux 裸 ELF，绿色即用——
+      # 不打 .deb（装进 /usr/bin 后产物落盘目录不可写，且违背「下载即跑」承诺）。
+      # 只有 child 产物才是平台原生安装形态（.exe 单文件 / .deb 包）。
+      - name: Stage bare ELF
         run: |
           set -euo pipefail
-          STAGING=$(mktemp -d)
-          mkdir -p "$STAGING/DEBIAN" \
-                   "$STAGING/usr/bin" \
-                   "$STAGING/usr/share/applications" \
-                   "$STAGING/usr/share/icons/hicolor/256x256/apps" \
-                   "$STAGING/usr/share/doc/web2app"
-
-          cp target/release/web2app "$STAGING/usr/bin/web2app"
-          chmod 755 "$STAGING/usr/bin/web2app"
-          cp assets/logo_256.png "$STAGING/usr/share/icons/hicolor/256x256/apps/web2app.png"
-
-          VERSION="${GITHUB_REF_NAME#v}"
-          cat > "$STAGING/DEBIAN/control" <<EOF
-          Package: web2app
-          Version: ${VERSION}
-          Architecture: amd64
-          Maintainer: Web2App Packager <https://github.com/31i45/Web2App>
-          Depends: libwebkit2gtk-4.1-0, libgtk-3-0, gstreamer1.0-libav, gstreamer1.0-plugins-bad
-          Description: Web2App packager - turn websites into desktop apps
-          EOF
-
-          cat > "$STAGING/usr/share/applications/web2app.desktop" <<EOF
-          [Desktop Entry]
-          Type=Application
-          Name=Web2App
-          Comment=Turn websites into desktop apps
-          Exec=/usr/bin/web2app
-          Icon=web2app
-          Terminal=false
-          Categories=Development;
-          EOF
-
-          cat > "$STAGING/usr/share/doc/web2app/copyright" <<EOF
-          Web2App Packager <https://github.com/31i45/Web2App>
-          MIT License
-          EOF
-
-          dpkg-deb --build "$STAGING" "web2app-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.deb"
-          rm -rf "$STAGING"
-          ls -l web2app-*.deb
+          mkdir -p dist
+          cp target/release/web2app "dist/web2app-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          chmod +x dist/web2app-*
+          ls -l dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bin-linux
-          path: web2app-*.deb
+          path: dist/*
           if-no-files-found: error
 
   # 汇总产物 + SHA256SUMS → GitHub Release（发布物唯一来源）

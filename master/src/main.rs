@@ -77,10 +77,7 @@ fn cli_pack(args: impl Iterator<Item = String>) {
     },
     None => None,
   };
-  let out = out.unwrap_or_else(|| {
-    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    exe.parent().map(|d| d.to_path_buf()).unwrap_or_default().join(ui::product_filename(&url))
-  });
+  let out = out.unwrap_or_else(|| dir_of_current_exe().join(ui::product_filename(&url)));
   match crate::platform::pack(&out, &url, icon) {
     Ok(b) => println!("OK {} ({} bytes)", b.exe.display(), b.size),
     Err(e) => {
@@ -258,6 +255,8 @@ impl Master {
 
 /// 产物输出目录：master 所在目录（自包含，不产生缓存目录）。
 ///
+/// master 跨平台均为裸可执行分发（Windows .exe / Linux 裸 ELF），用户下载放哪
+/// 产物落哪——所在目录必然可写，两平台语义对称。
 /// `current_exe` 在 Windows 下返回 `\\?\C:\...` verbatim 形态，剥离后路径更整洁
 /// （同时供状态回写展示）。
 fn dir_of_current_exe() -> std::path::PathBuf {
