@@ -257,14 +257,38 @@ jobs:
           sha256sum web2app-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # gh release create --generate-notes 在 ubuntu runner 上静默失败（无输出、
+      # 不创建 release、exit 0）—— 换用 GitHub API 直接创建，显式报错不静默。
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" dist/* \
-              --title "Web2App ${GITHUB_REF_NAME}" \
-              --generate-notes
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # 已存在则先删除（幂等重发）
+          RELEASE_ID=$(curl -sf -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+          if [ -n "$RELEASE_ID" ]; then
+            curl -sf -X DELETE -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/$RELEASE_ID"
           fi
+          # 创建 release
+          RELEASE_ID=$(curl -sf -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"Web2App ${TAG}\"}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          echo "release id: $RELEASE_ID"
+          # 上传产物
+          for f in dist/*; do
+            NAME=$(basename "$f")
+            echo "uploading: $NAME"
+            curl -sf -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$f" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/$RELEASE_ID/assets?name=$NAME"
+          done
+          echo "release published: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
