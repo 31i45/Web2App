@@ -158,10 +158,84 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Linux 发布：打包器自身的 .deb（用户 apt install 后即得 GUI 打包器）
+  build-linux:
+    name: build (linux)
+    needs: verify-linux
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install WebKitGTK dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+
+      - name: Build child then workspace
+        run: |
+          cargo build -p child --release --locked
+          cargo build --workspace --release --locked
+
+      - name: Create .deb package of web2app packager
+        run: |
+          set -euo pipefail
+          STAGING=$(mktemp -d)
+          mkdir -p "$STAGING/DEBIAN" \
+                   "$STAGING/usr/bin" \
+                   "$STAGING/usr/share/applications" \
+                   "$STAGING/usr/share/icons/hicolor/256x256/apps" \
+                   "$STAGING/usr/share/doc/web2app"
+
+          cp target/release/web2app "$STAGING/usr/bin/web2app"
+          chmod 755 "$STAGING/usr/bin/web2app"
+          cp assets/logo_256.png "$STAGING/usr/share/icons/hicolor/256x256/apps/web2app.png"
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > "$STAGING/DEBIAN/control" <<EOF
+          Package: web2app
+          Version: ${VERSION}
+          Architecture: amd64
+          Maintainer: Web2App Packager <https://github.com/31i45/Web2App>
+          Depends: libwebkit2gtk-4.1-0, libgtk-3-0, gstreamer1.0-libav, gstreamer1.0-plugins-bad
+          Description: Web2App packager - turn websites into desktop apps
+          EOF
+
+          cat > "$STAGING/usr/share/applications/web2app.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Web2App
+          Comment=Turn websites into desktop apps
+          Exec=/usr/bin/web2app
+          Icon=web2app
+          Terminal=false
+          Categories=Development;
+          EOF
+
+          cat > "$STAGING/usr/share/doc/web2app/copyright" <<EOF
+          Web2App Packager <https://github.com/31i45/Web2App>
+          MIT License
+          EOF
+
+          dpkg-deb --build "$STAGING" "web2app-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.deb"
+          rm -rf "$STAGING"
+          ls -l web2app-*.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-linux
+          path: web2app-*.deb
+          if-no-files-found: error
+
   # 汇总产物 + SHA256SUMS → GitHub Release（发布物唯一来源）
   release:
     name: publish release
-    needs: build
+    needs: [build, build-linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -172,7 +246,6 @@ jobs:
       - name: Download all platform binaries
         uses: actions/download-artifact@v4
         with:
-          name: bin-windows
           path: dist
 
       - name: Generate checksums
@@ -185,6 +258,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "Web2App ${GITHUB_REF_NAME}" \
-            --generate-notes
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "Web2App ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi

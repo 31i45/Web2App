@@ -17,7 +17,7 @@ Web→桌面应用打包器。输入网页 URL（可选自定义图标），生�
 .\dist\web2app.exe  # 运行打包器
 ```
 
-**Linux**（x86_64，需 WebKitGTK 4.1 运行环境）：
+**Linux**（x86_64，需 WebKitGTK 4.1 运行环境）：从 [Releases](https://github.com/31i45/Web2App/releases) 下载 `web2app-v*-x86_64-unknown-linux-gnu.deb`，`sudo apt install ./web2app-*.deb` 后应用菜单出现启动项；或本地构建：
 
 ```bash
 ./build.sh           # 一键构建（同 Windows 门禁口径）
