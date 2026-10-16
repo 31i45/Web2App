@@ -16,7 +16,13 @@ tail-core = { workspace = true }
 wry = { workspace = true }
 tao = { workspace = true }
 png = { workspace = true }
+
+# Windows-only 运行时依赖：文件图标注入（`UpdateResource`）用其 Win32 绑定。
+# Linux/macOS 目标的图标走 `.desktop`/hicolor（`.deb`，阶段 1）与 `.icns`
+# （`.app`，阶段 2），不注入 `.rsrc` → 必须按目标平台下沉。
+[target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
 
+# winres 无条件保留：理由同 child/Cargo.toml（build script host 编译 + 交叉编译）。
 [build-dependencies]
 winres = "0.1"

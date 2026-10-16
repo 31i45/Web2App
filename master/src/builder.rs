@@ -68,8 +68,10 @@ pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result
     fs::write(&tmp_out, CHILD_TEMPLATE)?;
 
     // 2) 注入用户图标到 .rsrc（非阻塞：失败仅警告，child 保留 w2a 默认文件图标）
+    //    平台外壳：Windows = UpdateResource 注入 .rsrc；Linux = no-op（图标走
+    //    `.desktop` + hicolor，属阶段 1 T-1-4）。
     if let Some(ref png) = icon_png {
-      if let Err(e) = crate::winicon::inject_file_icon(&tmp_out, png) {
+      if let Err(e) = crate::platform::inject_file_icon(&tmp_out, png) {
         eprintln!("图标注入失败（非阻塞，用默认 w2a 图标）：{e}");
       }
     }
@@ -96,8 +98,8 @@ pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result
 
   match built {
     Ok(size) => {
-      // 5) 可选签名（非阻塞）
-      if let Err(e) = crate::sign::maybe_sign(out_path) {
+      // 5) 可选签名（非阻塞）。平台外壳：Windows = signtool hook；Linux = no-op hook。
+      if let Err(e) = crate::platform::maybe_sign(out_path) {
         eprintln!("签名失败（非阻塞）：{e}");
       }
       Ok(BuildOutput { exe: out_path.to_path_buf(), size })

@@ -1,15 +1,17 @@
-//! child/src/webview.rs — 统一渲染层（Windows 原生 WebView 适配层）。
+//! child/src/webview.rs — 统一渲染层（跨平台装配 + 注入桥）。
 //!
-//! v2 Windows-only：仅 WebView2 后端。上层（main.rs）只面向 `open_webview`
-//! 一个入口。master 有自己的窗口构建逻辑（不依赖本模块）。
+//! 上层（main.rs）只面向 `open_webview` 一个入口；master 有自己的窗口构建逻辑
+//! （不依赖本模块）。平台差异（Windows WebView2 / Linux WebKitGTK / macOS WKWebView）
+//! 由 `crate::platform` 的同名外壳收敛，本文件只做**装配**与**纯 JS 注入桥**。
 //!
-//! 主线窗口承载全部宿主侧能力：新窗口路由（见 `popup` 模块）、HTML5 全屏、
-//! 缩放手势、剪贴板、下载反馈、标题同步、Alt+Home 回首页，并把页面 `window.close()`
-//! 降级为无操作（浏览器对「非脚本打开的顶层窗」同样忽略关闭请求，此处对齐该语义
-//! 以免页面意外终结应用）。wry 的回调都是 `'static` 的，拿不到 `&EventLoop`，故需要
-//! 宿主侧动作（导航、全屏、标题、提示）统一经 `EventLoopProxy` 回流主循环执行。
+//! 主线窗口承载全部宿主侧能力：新窗口路由（判定见 `popup`，管线见 `platform`）、
+//! HTML5 全屏、缩放手势、剪贴板、下载反馈、标题同步、Alt+Home 回首页，并把页面
+//! `window.close()` 降级为无操作（浏览器对「非脚本打开的顶层窗」同样忽略关闭请求，
+//! 此处对齐该语义以免页面意外终结应用）。wry 的回调都是 `'static` 的，拿不到
+//! `&EventLoop`，故需要宿主侧动作（导航、全屏、标题、提示）统一经 `EventLoopProxy`
+//! 回流主循环执行。
 
-use crate::popup::{self, NewWindowAction};
+use crate::popup::NewWindowAction;
 use tail_core::AppConfig;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,7 +20,13 @@ use tao::{
   event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
   window::{Fullscreen, Icon, Theme, Window, WindowBuilder},
 };
-use wry::{WebContext, WebView, WebViewExtWindows};
+use wry::{WebContext, WebView};
+
+/// 宿主层「回首页」按键机制的阶段门控（详见 [`home_hotkey_script`]）。
+///
+/// `false` = 页面层 `keydown` 与宿主层并存（阶段 1）；`true` = 由宿主层独占
+/// （删除页面层注册，阶段 2）。语义与平台无关，故置于此处而非平台模块。
+pub(crate) const HOST_ONLY: bool = false;
 
 /// 子应用自定义事件：宿主侧状态变更一律回流主循环处理。
 #[derive(Debug)]
@@ -31,7 +39,7 @@ pub enum ChildEvent {
   SetTitle(String),
   /// 页面内轻提示（下载反馈等）。
   Toast(String),
-  /// 宿主层 Alt+Home 命中 → 触发页面回首页动作（见 `accelerator`）。
+  /// 宿主层 Alt+Home 命中 → 触发页面回首页动作（见 `platform` 的按键外壳）。
   GoHome,
 }
 
@@ -52,15 +60,29 @@ pub fn open_webview(config: AppConfig) -> Result<(), String> {
     .and_then(crate::icon::window_icon)
     .or_else(crate::icon::default_window_icon);
   let window = build_window(&event_loop, &config.title, None, icon)?;
-  // 关闭哨兵必须在 WebView 构建（wry 挂接 subclass）之前安装，见 tail_core 文档。
-  tail_core::arm_close_watchdog(tao::platform::windows::WindowExtWindows::hwnd(&window));
+  // 关闭哨兵必须在 WebView 构建（Windows 下 wry 挂接 subclass）之前安装，
+  // 见 platform 外壳文档。Unix 侧为 no-op（无 WebView2 消息泵吞没问题）。
+  crate::platform::install_close_watchdog(&window);
   // WebContext 需存活至事件循环结束（数据目录指向系统应用数据区，不污染 exe 目录）
   let mut context = WebContext::new(Some(webview_data_dir(&config.url)));
-  let webview = build_webview(&window, &config, &mut context, proxy)
-    .map_err(|e| format!("创建 WebView 失败：{e}\n（Windows 请安装 WebView2 运行时：https://developer.microsoft.com/microsoft-edge/webview2/）"))?;
+  let webview = build_webview(&window, &config, &mut context, proxy).map_err(|e| {
+    let hint = if cfg!(target_os = "windows") {
+      "（Windows 请安装 WebView2 运行时：https://developer.microsoft.com/microsoft-edge/webview2/）"
+    } else if cfg!(target_os = "linux") {
+      "（Linux 请安装 WebKitGTK 运行库：sudo apt install libwebkit2gtk-4.1-0）"
+    } else {
+      ""
+    };
+    format!("创建 WebView 失败：{e}\n{hint}")
+  })?;
   // 页面主题跟随系统（含 prefers-color-scheme），与浏览器一致；
-  // 旧版 WebView2 运行时可能不支持此 API，静默忽略。
-  let _ = webview.set_theme(wry::Theme::Auto);
+  // WebView2 专有 API（WebViewExtWindows），旧运行时可能不支持，静默忽略。
+  // **不得宣称平价**：Unix 侧无对应能力（设计文档 §4.2）。
+  #[cfg(target_os = "windows")]
+  {
+    use wry::WebViewExtWindows;
+    let _ = webview.set_theme(wry::Theme::Auto);
+  }
 
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;
@@ -88,11 +110,11 @@ pub fn open_webview(config: AppConfig) -> Result<(), String> {
       } => {
         // 生命周期与 WebView 绑定：窗口即应用，关闭即退出，无驻留。
         // 先关弹窗：其 WebView 与 WebView2 子进程必须随宿主一起回收（零残留）。
-        popup::close_all();
+        crate::platform::close_all_popups();
         // Exit 之外加看门狗兜底：单条 WM_CLOSE 路径（Alt+F4/任务栏关闭/
-        // taskkill/自动化）下 WebView2 消息泵可能吞掉退出信号，见 tail_core 文档。
+        // taskkill/自动化）下 WebView2 消息泵可能吞掉退出信号，见 platform 文档。
         *control_flow = ControlFlow::Exit;
-        tail_core::quit_watchdog();
+        crate::platform::quit_watchdog();
       }
       _ => {}
     }
@@ -186,20 +208,22 @@ pub fn build_webview(
       // 「target=_blank 链接点了没反应」的根因。此处给出唯一出口决策。
       let has_popup = features.size.is_some() || features.position.is_some();
       let opener = current_host.lock().map(|h| h.clone()).unwrap_or_default();
-      match popup::classify_new_window(&url, &opener, has_popup) {
+      match crate::popup::classify_new_window(&url, &opener, has_popup) {
         NewWindowAction::SameTab => {
           let _ = proxy.send_event(ChildEvent::OpenInCurrent(url));
           wry::NewWindowResponse::Deny
         }
         NewWindowAction::External => {
-          popup::shell_open(&url);
+          crate::platform::shell_open(&url);
           wry::NewWindowResponse::Deny
         }
-        NewWindowAction::Popup => popup::create(&url, features, &home_for_popup).unwrap_or_else(|| {
-          // 建窗失败才降级；仅 http(s) 外发有意义（空白窗外发只会弹系统浏览器空白页）。
-          popup::open_external_if_http(&url);
-          wry::NewWindowResponse::Deny
-        }),
+        NewWindowAction::Popup => {
+          crate::platform::create_popup(&url, features, &home_for_popup).unwrap_or_else(|| {
+            // 建窗失败才降级；仅 http(s) 外发有意义（空白窗外发只会弹系统浏览器空白页）。
+            crate::platform::open_external_if_http(&url);
+            wry::NewWindowResponse::Deny
+          })
+        }
         NewWindowAction::Ignore => wry::NewWindowResponse::Deny,
       }
     });
@@ -209,10 +233,10 @@ pub fn build_webview(
   }
 
   let webview = builder.build(window)?;
-  // 宿主层 Alt+Home：跨源 iframe 焦点下页面层收不到按键，由 AcceleratorKeyPressed 在
-  // 「送达内容层之前」兜底。动作经 proxy 回流主循环，不在 COM 回调内同步 evaluate_script
-  // （WebView2 回调重入风险）。注册失败静默忽略；阶段门控见 accelerator::HOST_ONLY。
-  crate::accelerator::register(&webview, home_proxy);
+  // 宿主层 Alt+Home：跨源 iframe 焦点下页面层收不到按键，由平台外壳在
+  // 「送达内容层之前」兜底。动作经 proxy 回流主循环，不在 COM 回调内同步
+  // evaluate_script（WebView2 回调重入风险）。注册失败静默忽略；阶段门控见 HOST_ONLY。
+  crate::platform::install_keys(&webview, home_proxy);
   Ok(webview)
 }
 
@@ -316,7 +340,7 @@ pub(crate) fn inject_script(home: &str) -> String {
 /// iframe）；是否已在首页在按键时现算而非注入时算定（单页应用改地址不新建文档，注入时
 /// 算定的结果会过期）。
 ///
-/// 页面层 `keydown` 与宿主层并存与否由 [`crate::accelerator::HOST_ONLY`] 决定：阶段 1 并存、
+/// 页面层 `keydown` 与宿主层并存与否由 [`HOST_ONLY`] 决定：阶段 1 并存、
 /// 阶段 2 由宿主层独占。两层并存时 `goHome` 内的 200ms 时间戳去重防止同一次按键双重导航。
 fn home_hotkey_script(home: &str) -> String {
   let mut script = format!(
@@ -379,7 +403,7 @@ fn home_hotkey_script(home: &str) -> String {
 "#,
     tail_core::js_string_literal(home)
   );
-  if !crate::accelerator::HOST_ONLY {
+  if !HOST_ONLY {
     script.push_str(
       r#"
   document.addEventListener('keydown', function (ev) {
@@ -444,12 +468,12 @@ fn hex_val(b: u8) -> Option<u8> {
 
 /// WebView 用户数据目录：系统应用数据区，exe 旁不落盘。
 ///
-/// 路径为 `tail_core::data_dir("apps")` 下的一级：同一 host 下打包的不同应用
+/// 路径为 `platform::data_dir("apps")` 下的一级：同一 host 下打包的不同应用
 /// （`https://a.com/x` 与 `https://a.com/y`）profile 相互隔离，cookie / 存储 /
-/// 缓存互不污染；同一 URL 的多次打包共享同一 profile。基目录探测单点持有在
-/// `tail_core::data_base_dir`（与 master 共用同一探测链）。
+/// 缓存互不污染；同一 URL 的多次打包共享同一 profile。基目录探测由平台外壳
+/// `crate::platform::data_dir` 持有（Windows = `%LOCALAPPDATA%`，Unix = XDG）。
 pub fn webview_data_dir(url: &str) -> PathBuf {
-  tail_core::data_dir("apps")
+  crate::platform::data_dir("apps")
     .join(format!("{}_{}", tail_core::sanitize_host(url), tail_core::url_fingerprint(url)))
 }
 
@@ -478,8 +502,8 @@ mod tests {
 
   #[test]
   fn data_base_dir_is_absolute() {
-    // 探测链不 panic 且返回绝对路径（LOCALAPPDATA 或 temp 都是绝对路径）
-    assert!(tail_core::data_base_dir().is_absolute());
+    // 探测链不 panic 且返回绝对路径（Windows：LOCALAPPDATA 或 temp 均绝对）
+    assert!(crate::platform::data_dir("apps").is_absolute());
   }
 
   #[test]
@@ -529,7 +553,7 @@ mod tests {
     // 决策单点：页面层 keydown 与宿主层共用 homeAction
     assert!(script.contains("function homeAction()"), "decision entry missing: {script}");
     // 阶段门控随 accelerator::HOST_ONLY 自动切换：阶段 1 并存、阶段 2 由宿主层独占
-    if crate::accelerator::HOST_ONLY {
+    if HOST_ONLY {
       assert!(
         !script.contains("addEventListener('keydown'"),
         "HOST_ONLY 下必须删除页面层 keydown: {script}"

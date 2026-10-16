@@ -19,8 +19,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # v2 Windows-only：winres 资源编译 / user32 MessageBox / UpdateResource
-  # 均为无条件 Windows 代码，非 Windows 目标已不构建。
+  # 主门禁（G-0a）：Windows 是唯一发布目标，故 Windows 侧仍跑全部门禁
+  # （winres 资源编译 / user32 MessageBox / UpdateResource / 体积红线 / 结构审计）。
+  # Windows 之外的平台外壳在下一 job 验编译（阶段 0b 起 linux）。
   verify:
     name: verify (windows)
     runs-on: windows-latest
@@ -63,6 +64,37 @@ jobs:
       - name: Structural non-reproduction audit
         shell: pwsh
         run: ./audit.ps1 -ChildPath target/release/child.exe -MasterPath dist/web2app.exe
+
+  # Linux 接缝（阶段 0b）：Windows 之外的平台外壳必须与 child/master 同签名可编译
+  # （门禁 G-0b：G-0a 保持绿 + Linux 编译绿，见 docs/CROSS_PLATFORM_DESIGN.md §7）。
+  # wry 的 Linux 后端经 pkg-config 链接系统 WebKitGTK/GTK → 必须装开发库。
+  # 本阶段只验编译/测试/clippy，不产出 .deb（打包属阶段 1 T-1-4）。
+  verify-linux:
+    name: verify (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install WebKitGTK dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+
+      # 两阶段构建同 Windows：master 编译期内嵌 child（Linux 产物名为 child，无 .exe）。
+      - name: Build child (debug; master 编译期内嵌)
+        run: cargo build -p child --locked
+
+      - name: Tests
+        run: cargo test --locked --workspace
+
+      - name: Clippy (zero warnings, warnings as errors)
+        run: cargo clippy --all-targets --locked -- -D warnings
 
   # 发布（仅 v* 标签）：Windows 单目标
   build:

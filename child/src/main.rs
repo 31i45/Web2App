@@ -7,10 +7,10 @@
 //!
 //! Release 构建为 Windows GUI 子系统：双击运行不出现后台控制台。
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod accelerator;
 mod icon;
+mod platform;
 mod popup;
 mod webview;
 
@@ -18,13 +18,13 @@ fn main() {
   match tail_core::read_tail() {
     Ok(Some(c)) => {
       if let Err(e) = webview::open_webview(c) {
-        tail_core::show_fatal_and_exit(&e);
+        platform::fatal(&e);
       }
     }
-    Ok(None) => tail_core::show_fatal_and_exit(
+    Ok(None) => platform::fatal(
       "本程序是 Web2App 运行时组件，不能直接运行。\n请使用 Web2App 打包器生成应用。",
     ),
-    Err(e) => tail_core::show_fatal_and_exit(&format!(
+    Err(e) => platform::fatal(&format!(
       "读取运行配置失败：{e}\n（文件可能已损坏，请重新获取本程序）"
     )),
   }

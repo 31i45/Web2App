@@ -55,24 +55,27 @@ Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定�
 v2 采用三 crate workspace 结构，实现「子应用结构性不可繁殖」与「单文件产物」的双重约束：
 
 ```
-tail-core/        # 共享层：尾部协议解析与编码、PNG 解码、URL 工具、致命错误呈现（零 tao/wry 依赖）
+tail-core/        # 纯逻辑层：尾部协议解析与编码、PNG 解码、URL 工具（零 OS 依赖，可任意宿主单测）
 ├── src/lib.rs    #   AppConfig / read_tail / encode_tail / strip_tail / decode_png / resize_box / sanitize_host / host_of / url_fingerprint
 child/           # 子应用运行时（用户分发的精简产物，~700KB）
-├── build.rs     #   winres 编译 w2a.ico 进 .rsrc（文件图标默认值）
+├── build.rs     #   winres 编译 w2a.ico 进 .rsrc（仅 Windows 目标；文件图标默认值）
 ├── src/main.rs  #   读尾部配置 → 打开 WebView；无配置 → 报错（不可直接运行）
-├── src/accelerator.rs # 宿主层 Alt+Home（WebView2 AcceleratorKeyPressed，跨源 iframe 焦点下兜底）
 ├── src/icon.rs  #   用户 PNG → tao 窗口图标（用 tail_core::decode_png）
-├── src/popup.rs #   新窗口路由（同站就地 / 跨站交系统 / 弹窗建独立原生窗 / 伪协议忽略）
-└── src/webview.rs # WebView2 窗口构建（数据目录 LOCALAPPDATA\Web2App\apps\<host>_<指纹>）
+├── src/platform/ #  平台外壳（`#[cfg]` 同名同签名模块，非 trait）：windows.rs / linux.rs =
+│                  #  数据目录 / 宿主层按键 / 新窗口弹窗管线 / 外发 / 全屏 / 关闭兜底 / 致命错误
+├── src/popup.rs #   新窗口路由判定（同站就地 / 跨站交系统 / 弹窗 / 伪协议忽略；纯逻辑无 OS 依赖）
+└── src/webview.rs # 跨平台装配：WebView 构建 + 注入桥 + 全部宿主侧能力接线
 master/          # 打包器（编译期内嵌 child 模板，~1.5MB）
-├── build.rs     #   定位 child.exe（OUT_DIR 上溯，兼容 --target）→ 拷贝内嵌；winres w2a 图标+身份
+├── build.rs     #   定位 child 二进制（OUT_DIR 上溯，兼容 --target）→ 拷贝内嵌；winres w2a 图标+身份
 ├── src/main.rs  #   表单窗口 + 打包调度
+├── src/platform/ #  平台外壳：windows.rs / linux.rs = 数据目录 / verbatim 路径剥离 / 关闭兜底 /
+│                  #  致命错误 / 打包平台项（pack / inject_file_icon / maybe_sign）
 ├── src/ui.rs    #   内嵌 HTML 表单 + IPC 解析
-├── src/builder.rs #  CHILD_TEMPLATE + pack（模板 → 注入图标 → 追加尾部 → 签名）
+├── src/builder.rs #  CHILD_TEMPLATE + pack 编排骨架（模板 → 注入图标 → 追加尾部 → 签名）
 ├── src/tail_write.rs # 尾部写入（自 tail-core 外迁：写尾能力不进 child 依赖图，编译期不可繁殖）
-├── src/winicon.rs # PNG→ICO + UpdateResource 注入 .rsrc（用户自定义文件图标）
+├── src/winicon.rs # PNG→ICO + UpdateResource 注入 .rsrc（仅 Windows；经 platform 外壳暴露）
 ├── src/icon.rs  #   母版窗口图标（与 child 同构，master 不依赖 child crate）
-└── src/sign.rs  #   可选 signtool 签名 hook（非阻塞）
+└── src/sign.rs  #   可选 signtool 签名 hook（仅 Windows；经 platform 外壳暴露）
 audit.ps1        # 结构性不可繁殖静态审计（CI 门禁：字符串标记 / PE 映像数 / cargo tree 依赖边界）
 assets/
 ├── w2a.ico      # w2a 文件图标源（winres 编译进 child.exe）
@@ -113,8 +116,8 @@ CRC32（IEEE 802.3）覆盖 payload + 长度 + 版本字节，尾部被截断或
 实测（tao 0.37 + wry 0.57/WebView2）：单条 `WM_CLOSE` 路径下（Alt+F4、任务栏「关闭窗口」、`taskkill` 无 `/F`、UI 自动化），tao 的 `CloseRequested` 事件可能永不派发——消息被 WebView2 嵌套 COM 消息泵吞没，进程 30s+ 不自退。
 
 v2 采用两层确定性兜底：
-- **WNDPROC 哨兵**（`tail_core::arm_close_watchdog`）：在 WebView 构建前替换窗口过程，`WM_CLOSE` 在消息进入框架之前即被捕获，武装看门狗后无条件透传 tao 原过程，事件链无损。
-- **看门狗线程**（`tail_core::quit_watchdog`）：独立线程 sleep 300ms 后 `process::exit(0)`，绕开消息泵竞争，给出确定退出上限。
+- **WNDPROC 哨兵**（`child|master::platform::install_close_watchdog`）：在 WebView 构建前替换窗口过程，`WM_CLOSE` 在消息进入框架之前即被捕获，武装看门狗后无条件透传 tao 原过程，事件链无损。
+- **看门狗线程**（`child|master::platform::quit_watchdog`）：独立线程 sleep 300ms 后 `process::exit(0)`，绕开消息泵竞争，给出确定退出上限。
 
 鼠标点 X 因伴随消息风暴通常无感；但「关闭即退出、零残留」不依赖运气。
 

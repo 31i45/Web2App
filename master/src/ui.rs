@@ -5,9 +5,10 @@
 //! 图片字节经 base64 由 IPC 传给原生，无需绝对路径。
 
 /// 母版 WebView 数据目录（固定名，不打扰任何 exe 目录）。
-/// 基目录探测单点持有在 `tail_core::data_base_dir`（与 child 共用同一探测链）。
+/// 基目录探测由平台外壳 `crate::platform::data_dir` 持有（Windows = `%LOCALAPPDATA%`，
+/// Unix = XDG；与 child 侧同名函数同构，但各自 crate 独立持有）。
 pub fn master_data_dir() -> std::path::PathBuf {
-  tail_core::data_dir("master")
+  crate::platform::data_dir("master")
 }
 
 /// 母版表单页 HTML（纯静态）。全部样式内联，无网络请求、无外部依赖。

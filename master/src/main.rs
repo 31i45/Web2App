@@ -8,13 +8,18 @@
 //!
 //! Release 构建为 Windows GUI 子系统：双击运行不出现后台控制台。
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod builder;
 mod icon;
-mod sign;
+mod platform;
 mod tail_write;
 mod ui;
+// Windows-only 打包器平台项：文件图标注入（UpdateResource）与可选签名（signtool）。
+// 经 `crate::platform` re-export（见 platform/windows.rs），使 builder.rs 无 #[cfg]。
+#[cfg(target_os = "windows")]
+mod sign;
+#[cfg(target_os = "windows")]
 mod winicon;
 
 use tao::event_loop::ControlFlow;
@@ -40,10 +45,12 @@ fn run_master() {
   let icon = icon::default_window_icon();
   let window = match build_master_window(&event_loop, "Web2App 打包器", Theme::Dark, icon) {
     Ok(w) => w,
-    Err(e) => tail_core::show_fatal_and_exit(&e),
+    Err(e) => platform::fatal(&e),
   };
-  // 关闭哨兵必须在 WebView 构建（wry 挂接 subclass）之前安装，见 tail_core 文档。
-  tail_core::arm_close_watchdog(tao::platform::windows::WindowExtWindows::hwnd(&window));
+  // 关闭哨兵必须在 WebView 构建（wry 挂接 subclass）之前安装，见 platform 文档。
+  // 传入 `&Window`（而非平台句柄）使调用点平台无关：Windows 内部自取 HWND，
+  // Unix 侧为 no-op（见 platform/linux.rs）。
+  platform::install_close_watchdog(&window);
   let mut context = WebContext::new(Some(ui::master_data_dir()));
 
   let webview = match wry::WebViewBuilder::new_with_web_context(&mut context)
@@ -57,8 +64,15 @@ fn run_master() {
     .build(&window)
   {
     Ok(w) => w,
-    Err(e) => tail_core::show_fatal_and_exit(&format!(
-      "创建母版界面失败：{e}\n（Windows 请安装 WebView2 运行时：https://developer.microsoft.com/microsoft-edge/webview2/）"
+    Err(e) => platform::fatal(&format!(
+      "创建母版界面失败：{e}\n{}",
+      if cfg!(target_os = "windows") {
+        "（Windows 请安装 WebView2 运行时：https://developer.microsoft.com/microsoft-edge/webview2/）"
+      } else if cfg!(target_os = "linux") {
+        "（Linux 请安装 WebKitGTK 运行库：sudo apt install libwebkit2gtk-4.1-0）"
+      } else {
+        ""
+      }
     )),
   };
 
@@ -78,7 +92,7 @@ fn run_master() {
         master.webview = None;
         *control_flow = ControlFlow::Exit;
         // 同 child：看门狗保证单条 WM_CLOSE 路径（Alt+F4/任务栏关闭）确定终止。
-        tail_core::quit_watchdog();
+        platform::quit_watchdog();
       }
       _ => {}
     }
@@ -87,7 +101,7 @@ fn run_master() {
 
 /// 构建母版窗口（深色标题栏）。
 /// 构建失败返回 Err——与紧随其后的 WebView 构建失败同一策略，由调用方
-/// 经 `show_fatal_and_exit` 呈现；不在此 panic（GUI 子系统 + panic=abort 即静默死亡）。
+/// 经 `platform::fatal` 呈现；不在此 panic（GUI 子系统 + panic=abort 即静默死亡）。
 fn build_master_window(
   event_loop: &tao::event_loop::EventLoop<FormEvent>,
   title: &str,
@@ -131,7 +145,7 @@ impl Master {
       }
     };
 
-    match builder::pack(&out, &url, icon) {
+    match platform::pack(&out, &url, icon) {
       Ok(result) => {
         let kb = result.size as f64 / 1024.0;
         self.set_status(
@@ -159,8 +173,12 @@ impl Master {
 }
 
 /// 产物输出目录：master 所在目录（自包含，不产生缓存目录）。
+///
+/// `current_exe` 在 Windows 下返回 `\\?\C:\...` verbatim 形态，剥离后路径更整洁
+/// （同时供状态回写展示）。
 fn dir_of_current_exe() -> std::path::PathBuf {
   tail_core::current_exe()
+    .map(crate::platform::strip_verbatim_prefix)
     .ok()
     .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())

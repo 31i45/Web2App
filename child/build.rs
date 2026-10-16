@@ -4,10 +4,15 @@
 //! —— 文件图标（Explorer/任务栏）由此而来。child 产物字节级继承此图标，
 //! master 用 UpdateResource 在打包时注入用户自定义图标覆盖此位置。
 //!
-//! v2 Windows-only：不再需要 CARGO_CFG_TARGET_OS 目标平台门控
-//! （无交叉编译 Unix 目标场景）。
+//! 目标平台门控：winres 仅对 Windows 目标生效。build script 在 **host** 上运行，
+//! 故判据必须取 `CARGO_CFG_TARGET_OS`（而非 `cfg!(windows)`，后者在
+//! Windows host 交叉编译 Unix 目标时误判为真）。Linux/macOS 目标的文件图标
+//! 由 master 的对应打包器另行处理。
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
     // assets 在 workspace 根目录，child 子 crate 经 CARGO_MANIFEST_DIR 回溯上一级。
     let icon = format!("{}/../assets/w2a.ico", env!("CARGO_MANIFEST_DIR"));
     let mut res = winres::WindowsResource::new();

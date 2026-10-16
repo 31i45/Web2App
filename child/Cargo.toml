@@ -9,10 +9,19 @@ description = "Web2App 子应用运行时（用户分发的精简单文件产物
 tail-core = { workspace = true }
 wry = { workspace = true }
 tao = { workspace = true }
+
+# Windows-only 运行时依赖：宿主层 Alt+Home 需要 WebView2 原生接口
+# （`ICoreWebView2Controller::add_AcceleratorKeyPressed`）。Linux/macOS 目标
+# 无此依赖 → 必须按目标平台下沉，否则 Unix 目标会去编译 Windows crate。
+[target.'cfg(windows)'.dependencies]
 webview2-com = { workspace = true }
 
 [dev-dependencies]
 png = { workspace = true }
 
+# winres 保留为**无条件** build-dependency：build script 在 host 上编译，
+# 其 Windows 分支虽被 `CARGO_CFG_TARGET_OS` 运行时门控，但代码仍需可编译；
+# 且 winres 本身支持非 Windows host 交叉编译。build-dependency 不进产物，
+# 不影响轻量红线（见 docs/CROSS_PLATFORM_DESIGN.md §3.4）。
 [build-dependencies]
 winres = "0.1"

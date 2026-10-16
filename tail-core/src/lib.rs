@@ -1,18 +1,16 @@
-//! tail-core — Web2App 共享层。
+//! tail-core — Web2App 共享层（纯逻辑层）。
 //!
 //! 三方共用：尾部协议（child 读取运行配置；**写尾已外迁 `master/src/tail_write.rs`**，
 //! 本 crate 只保留解析与 [`encode_tail`] 编码纯函数——写能力不在 child 的依赖图中，
 //! 构成编译期结构性保证）、
 //! PNG 解码与缩放（child 把用户图与 w2a 默认图转为像素，供 tao Icon 用）、
-//! URL 工具（master 产物文件名与 child 数据目录共用 sanitize_host 单点持有）、
-//! 致命错误呈现（Windows GUI 子系统下 stderr 无人看，必须 MessageBox）。
+//! URL 工具（master 产物文件名与 child 数据目录共用 sanitize_host 单点持有）。
 //!
-//! 设计红线：零 tao/wry 依赖。本 crate 仅为「数据层」与「系统错误呈现」，
-//! 任何引用窗口/WebView 类的代码不得引入此处（避免 child 产物体积膨胀）。
+//! 设计红线：**零 OS 依赖**（零 tao/wry、零 Win32/GTK/Cocoa），可任意宿主单测。
+//! 全部平台外壳代码（错误呈现 / 关闭看门狗 / 数据目录 / 路径规范化）都在
+//! `child|master` 的 `platform/` 同名模块中，本 crate 仅为「纯数据层」。
 //! 窗口图标转换在 child/icon.rs（依赖 tao::window::Icon），此处只到像素字节为止。
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -308,34 +306,13 @@ fn payload_crc(payload: &[u8]) -> u32 {
   c.finish()
 }
 
-/// 当前可执行文件路径（Windows 下手动剥离 `\\?\` verbatim 前缀，零依赖替代 dunce）。
+/// 当前可执行文件路径。
 ///
-/// 仅 `\\?\C:\...` 驱动器号形态被剥离为 `C:\...`；`\\?\UNC\server\share`
-/// 转写为 `\\server\share`。无需 canonicalize：调用方（read_tail 自读、
-/// master 的 dir_of_current_exe 写出目录）都不要求符号链接解析。
+/// 纯 `std::env::current_exe` 转发：平台相关的 verbatim 前缀（`\\?\`）剥离
+/// 已外迁各 crate 的 `platform/` 模块（Windows 见
+/// `master/src/platform/windows.rs` 的 `strip_verbatim_prefix`），本函数保持零 OS 依赖。
 pub fn current_exe() -> io::Result<PathBuf> {
-  let p = std::env::current_exe()?;
-  Ok(strip_verbatim_prefix(p))
-}
-
-/// Windows verbatim `\\?\` 前缀剥离。
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-  let s = match p.to_str() {
-    Some(s) => s,
-    None => return p, // 非 UTF-8 路径，原样返回（Windows 上罕见但保守）
-  };
-  if let Some(rest) = s.strip_prefix(r"\\?\") {
-    // 驱动器号形态：\\?\C:\foo → C:\foo
-    let b = rest.as_bytes();
-    if b.len() >= 2 && b[1] == b':' {
-      return PathBuf::from(rest);
-    }
-    // UNC 形态：\\?\UNC\server\share → \\server\share
-    if let Some(unc_rest) = rest.strip_prefix("UNC\\") {
-      return PathBuf::from(format!(r"\\{unc_rest}"));
-    }
-  }
-  p
+  std::env::current_exe()
 }
 
 // ============================================================================
@@ -679,151 +656,7 @@ pub fn url_fingerprint(url: &str) -> String {
 }
 
 // ============================================================================
-// 应用数据目录（Windows-only；child 数据目录与 master 数据目录共用同一探测链）
-// ============================================================================
-
-/// 系统应用数据基目录探测：%LOCALAPPDATA% → 兜底 temp。
-///
-/// Windows 上 LOCALAPPDATA 几乎总存在；缺失（极端环境）回落 temp 保证不 panic。
-/// 单点持有：child 的 WebView 数据目录与 master 的数据目录共用本函数。
-pub fn data_base_dir() -> PathBuf {
-  std::env::var_os("LOCALAPPDATA")
-    .map(PathBuf::from)
-    .unwrap_or_else(std::env::temp_dir)
-}
-
-/// `<数据基目录>/Web2App/<sub>`：品牌目录与子系统名的拼接收敛于此，
-/// 保证 child（apps）与 master（master）落在同一棵树下，且互不污染 exe 目录。
-pub fn data_dir(sub: &str) -> PathBuf {
-  data_base_dir().join("Web2App").join(sub)
-}
-
-// ============================================================================
-// 致命错误呈现（Windows-only，无 Unix 分支）
-// ============================================================================
-
-/// 致命错误的用户可见呈现后退出（返回 `!`）。
-///
-/// 动机：release 为 Windows GUI 子系统且 `panic = "abort"`，`eprintln` 无人看见、
-/// panic 无输出——错误必须以用户可感知的方式呈现，否则双击即"静默死亡"。
-/// Windows 用 MessageBoxW（`extern` 直接声明，零新依赖）。
-pub fn show_fatal_and_exit(msg: &str) -> ! {
-  #[link(name = "user32")]
-  extern "system" {
-    fn MessageBoxW(
-      hwnd: *mut core::ffi::c_void,
-      text: *const u16,
-      caption: *const u16,
-      utype: u32,
-    ) -> i32;
-  }
-  const MB_OK: u32 = 0x0;
-  const MB_ICONERROR: u32 = 0x10;
-  let text: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
-  let caption: Vec<u16> = "Web2App".encode_utf16().chain(std::iter::once(0)).collect();
-  unsafe {
-    MessageBoxW(
-      std::ptr::null_mut(),
-      text.as_ptr(),
-      caption.as_ptr(),
-      MB_OK | MB_ICONERROR,
-    );
-  }
-  std::process::exit(1)
-}
-
-/// 关闭看门狗：300ms 后若进程仍存活，以退出码 0 结束进程。
-///
-/// 与 tao 事件处理里的 `ControlFlow::Exit` 配对使用。实测（tao 0.37 +
-/// wry 0.57/WebView2）：单条 WM_CLOSE 路径下（Alt+F4、任务栏「关闭窗口」、
-/// taskkill 无 /F、UI 自动化），即使投递 WM_QUIT 也会被 Chromium 嵌套 COM
-/// 消息泵在 tao 外层 GetMessage 之前吞掉——进程要等下一条消息才退出；
-/// 鼠标点 X 因伴随消息风暴通常无感，但「关闭即退出」不能依赖运气。
-///
-/// 看门狗在独立线程睡眠，不参与消息泵竞争，给出 300ms 的确定退出上限。
-/// 正常路径几乎总先于它结束（tao run() 末尾自身即 process::exit，本就不做
-/// 栈展开），线程随进程消失，零副作用；仅在框架卡死时兜底。WebView2 按
-/// 浏览器进程被杀的常态设计，硬退出不损坏数据目录。
-///
-/// 幂等：多次调用仅多 spawn 无害线程，exit 先到先得。配套：
-/// [`arm_close_watchdog`]——在 WNDPROC 层面保证本函数必然被武装。
-pub fn quit_watchdog() {
-  std::thread::spawn(|| {
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    std::process::exit(0);
-  });
-}
-
-// 已武装窗口的「原窗口过程」注册表（hwnd → prev WNDPROC）。
-//
-// 按 hwnd 分槽而非全局单值：进程内可能存在多个窗口（主窗口 + 新窗口路由
-// 产生的弹窗），单槽会在第二次武装时覆盖前一个窗口的链尾，令其哨兵调用错
-// 窗口过程。窗口消息只在创建窗口的线程派发，故 thread_local 足够，
-// 无需全局锁与跨线程可见性。
-thread_local! {
-  static PREV_WNDPROCS: RefCell<HashMap<isize, isize>> = RefCell::new(HashMap::new());
-}
-
-/// 在窗口上安装关闭哨兵：替换窗口过程，捕获 WM_CLOSE 并武装 [`quit_watchdog()`]。
-///
-/// 动机（实测 tao 0.37 + wry 0.57/WebView2）：单条 WM_CLOSE 路径下
-/// （Process.CloseMainWindow、Alt+F4、任务栏「关闭窗口」、taskkill 无 /F），
-/// tao 的 CloseRequested 事件可能**永不派发**——消息被 WebView2 嵌套 COM
-/// 消息泵吞没，进程 30s+ 不自退（本仓库 e2e 实测复现）。事件层无法自救，
-/// 必须在消息进入框架之前拦截。
-///
-/// 本函数在 WNDPROC 层面捕获 WM_CLOSE——先于一切框架事件派发，不受消息泵
-/// 吞没影响——收到即武装看门狗（300ms 确定退出），随后无条件
-/// `CallWindowProcW` 透传给原过程，正常事件链完全不受影响。
-///
-/// 调用约束：
-/// - 必须在**创建 WebView 之前**调用：wry 挂接其 subclass 时以当前 WNDPROC
-///   为链尾，先挂哨兵可保证 wry 的 WM_SIZE/WM_SETFOCUS 等处理仍在链上。
-/// - 须在窗口所属线程调用（child/master 均在主线程窗口创建后立即调用）。
-///
-/// 无竞态：挂接发生在事件循环启动前、hwnd 尚未暴露给任何其他线程，
-/// 消息不可能在 store 原过程之前到达哨兵 proc。
-pub fn arm_close_watchdog(hwnd: isize) {
-  #[link(name = "user32")]
-  extern "system" {
-    fn SetWindowLongPtrW(hwnd: isize, index: i32, new_value: isize) -> isize;
-    fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
-    fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
-  }
-  const GWLP_WNDPROC: i32 = -4;
-  const WM_CLOSE: u32 = 0x0010;
-
-  unsafe extern "system" fn close_watch_proc(
-    hwnd: isize,
-    msg: u32,
-    wparam: usize,
-    lparam: isize,
-  ) -> isize {
-    if msg == WM_CLOSE {
-      quit_watchdog();
-    }
-    let prev = PREV_WNDPROCS.with(|m| m.borrow().get(&hwnd).copied()).unwrap_or(0);
-    if prev == 0 {
-      // 未登记（武装失败或已被替换）：退化为默认处理，避免向空过程转发。
-      return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-    }
-    unsafe { CallWindowProcW(prev, hwnd, msg, wparam, lparam) }
-  }
-
-  // SAFETY: hwnd 为调用方持有的有效窗口句柄。SetWindowLongPtrW 原子换入
-  // 哨兵过程并返回原过程；失败返回 0 时不保存（哨兵永不生效，行为等同
-  // 未安装，退化为仅 tao handler 路径的看门狗）。
-  let prev =
-    unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, close_watch_proc as *const () as isize) };
-  if prev != 0 {
-    PREV_WNDPROCS.with(|m| {
-      m.borrow_mut().insert(hwnd, prev);
-    });
-  }
-}
-
-// ============================================================================
-// 测试（44 个：tail 协议 25 + PNG/缩放 6 + URL 工具 6 + 边界补充 7）
+// 测试（42 个：tail 协议 25 + PNG/缩放 6 + URL 工具 6 + 边界补充 5）
 // ============================================================================
 
 #[cfg(test)]
@@ -1426,19 +1259,7 @@ mod tests {
     assert_eq!(url_fingerprint(" https://example.com/ "), url_fingerprint("https://example.com/#top"));
   }
 
-  // ---------- 边界补充测试（7 个：路径 / 转义 / 位深 / 保留名 / 数据目录） ----------
-
-  #[test]
-  fn strip_verbatim_prefix_handles_win32_forms() {
-    // 驱动器号形态：\\?\C:\foo → C:\foo
-    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"\\?\C:\foo\bar")), PathBuf::from(r"C:\foo\bar"));
-    // UNC 形态：\\?\UNC\server\share → \\server\share
-    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\srv\share")), PathBuf::from(r"\\srv\share"));
-    // 无前缀：原样返回
-    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"C:\plain")), PathBuf::from(r"C:\plain"));
-    // 仅 `\\?\` 但既非驱动器也非 UNC：保守原样返回
-    assert_eq!(strip_verbatim_prefix(PathBuf::from(r"\\?\weird")), PathBuf::from(r"\\?\weird"));
-  }
+  // ---------- 边界补充测试（5 个：转义 / 位深 / 保留名） ----------
 
   #[test]
   fn read_tail_on_untailed_exe_is_none() {
@@ -1495,13 +1316,5 @@ mod tests {
     assert_eq!(sanitize_host("https://com0.org"), "com0.org");
     // 结尾点（Windows 会静默剥除）：先剥除，落盘名与预期一致
     assert_eq!(sanitize_host("https://example.com."), "example.com");
-  }
-
-  #[test]
-  fn data_dir_lives_under_brand_and_is_absolute() {
-    // 探测链不 panic 且返回绝对路径（LOCALAPPDATA 或 temp 均为绝对路径）
-    assert!(data_base_dir().is_absolute());
-    let s = data_dir("apps").to_string_lossy().replace('\\', "/");
-    assert!(s.ends_with("/Web2App/apps"), "got: {s}");
   }
 }
