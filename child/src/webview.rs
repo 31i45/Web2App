@@ -41,9 +41,8 @@ pub enum ChildEvent {
   Toast(String),
   /// 宿主层 Alt+Home 命中 → 触发页面回首页动作（见 `platform` 的按键外壳）。
   ///
-  /// Linux 阶段 0b 无产出者（`platform::install_keys` 为 no-op，待阶段 1 T-1-2
-  /// 接线；期间页面层 `keydown` 仍覆盖顶层帧的 Alt+Home）→ 显式豁免 dead_code。
-  #[allow(dead_code)]
+  /// 两平台的 `platform::install_keys` 均产出本事件（Windows `AcceleratorKeyPressed`、
+  /// Linux 组件级 `key-press-event`，见 T-1-2）。
   GoHome,
 }
 
@@ -161,10 +160,14 @@ pub fn build_window(
 ///
 /// devtools 仅 debug 构建启用（release 零开销）。
 /// 失败原因典型为系统 WebView 运行时缺失（Windows WebView2），返回 Err 交由调用方呈现。
-pub fn build_webview(
-  window: &Window,
+///
+/// 生命周期：`window` 与 `context` 统一取 `'a`——Linux 的挂载路径（`platform::mount_webview`
+/// → `build_gtk`）要求容器窗口与 `WebContext` 的借用都覆盖 WebView 构建期，分离的生命周期
+/// 会让调用点无法证明二者同时有效。Windows 侧直通路径同样接受该约束，无额外影响。
+pub fn build_webview<'a>(
+  window: &'a Window,
   config: &AppConfig,
-  context: &mut WebContext,
+  context: &'a mut WebContext,
   proxy: EventLoopProxy<ChildEvent>,
 ) -> Result<WebView, wry::Error> {
   // 当前页 host：站内/跨站判定的基准，随导航更新（on_page_load 回填）。
@@ -236,7 +239,8 @@ pub fn build_webview(
     builder = builder.with_devtools(true);
   }
 
-  let webview = builder.build(window)?;
+  // 挂载经平台外壳：Windows 直通 `build(window)`；Linux 必须走 GTK 容器（见 platform 同名项）。
+  let webview = crate::platform::mount_webview(builder, window)?;
   // 宿主层 Alt+Home：跨源 iframe 焦点下页面层收不到按键，由平台外壳在
   // 「送达内容层之前」兜底。动作经 proxy 回流主循环，不在 COM 回调内同步
   // evaluate_script（WebView2 回调重入风险）。注册失败静默忽略；阶段门控见 HOST_ONLY。

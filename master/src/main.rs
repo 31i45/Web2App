@@ -26,14 +26,68 @@ use tao::event_loop::ControlFlow;
 use tao::window::Theme;
 use wry::{WebContext, WebView};
 
-/// 事件循环自定义事件：打包请求（图标字节可选，None = 用 w2a 默认图标）。
+/// 事件循环自定义事件。
 #[derive(Debug, Clone)]
 enum FormEvent {
+  /// 打包请求（图标字节可选，None = 用 w2a 默认图标）。
   Pack { url: String, icon: Option<Vec<u8>> },
+  /// 后台打包线程的完成回执。打包必须离开事件循环线程：阻塞主循环 = GDK 停止
+  /// 回应 WM ping = 桌面会话判「未响应」（Linux 实测被 GNOME 判死，e2e.sh [4] 门禁）。
+  PackDone { out: std::path::PathBuf, result: Result<u64, String>, icon_note: String },
 }
 
 fn main() {
-  run_master();
+  // 无头打包模式：`web2app --pack <url> [--icon <png>] [--out <file>]`——打包动作
+  // 的机械入口（G-1 门禁与脚本化打包用；CI 无法驱动 GUI 表单）。不带参数 =
+  // GUI 表单，行为不变。
+  let mut args = std::env::args().skip(1);
+  if args.next().as_deref() == Some("--pack") {
+    cli_pack(args);
+  } else {
+    run_master();
+  }
+}
+
+/// CLI 打包：解析参数 → 平台 `pack` → 报告产物路径。退出码 0/1/2（成功/打包失败/用法错）。
+fn cli_pack(args: impl Iterator<Item = String>) {
+  let mut it = args;
+  let Some(url) = it.next() else {
+    eprintln!("usage: web2app --pack <url> [--icon <png>] [--out <file>]");
+    std::process::exit(2);
+  };
+  let mut icon_path = None;
+  let mut out = None;
+  while let (Some(k), Some(v)) = (it.next(), it.next()) {
+    match k.as_str() {
+      "--icon" => icon_path = Some(std::path::PathBuf::from(v)),
+      "--out" => out = Some(std::path::PathBuf::from(v)),
+      other => {
+        eprintln!("unknown option: {other}");
+        std::process::exit(2);
+      }
+    }
+  }
+  let icon = match icon_path {
+    Some(p) => match std::fs::read(&p) {
+      Ok(bytes) => Some(bytes),
+      Err(e) => {
+        eprintln!("PACK_FAIL: read icon {}: {e}", p.display());
+        std::process::exit(1);
+      }
+    },
+    None => None,
+  };
+  let out = out.unwrap_or_else(|| {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    exe.parent().map(|d| d.to_path_buf()).unwrap_or_default().join(ui::product_filename(&url))
+  });
+  match crate::platform::pack(&out, &url, icon) {
+    Ok(b) => println!("OK {} ({} bytes)", b.exe.display(), b.size),
+    Err(e) => {
+      eprintln!("PACK_FAIL: {e}");
+      std::process::exit(1);
+    }
+  }
 }
 
 /// 母版模式：表单窗口 + 打包执行。
@@ -53,15 +107,19 @@ fn run_master() {
   platform::install_close_watchdog(&window);
   let mut context = WebContext::new(Some(ui::master_data_dir()));
 
-  let webview = match wry::WebViewBuilder::new_with_web_context(&mut context)
+  // proxy 双用：IPC 回投 Pack；run 闭包内 Pack → start_pack（线程）→ PackDone。
+  let ipc = proxy.clone();
+  let builder = wry::WebViewBuilder::new_with_web_context(&mut context)
     .with_html(ui::form_html())
     .with_ipc_handler(move |req| {
       // 协议契约的行为级规格见 ui::parse_pack_message 测试
       if let Some((url, icon)) = ui::parse_pack_message(&req.into_body()) {
-        let _ = proxy.send_event(FormEvent::Pack { url, icon });
+        let _ = ipc.send_event(FormEvent::Pack { url, icon });
       }
-    })
-    .build(&window)
+    });
+  // 挂载经平台外壳：Windows 直通 `build(window)`；Linux 必须走 GTK 容器
+  //（Wayland 句柄问题同 child，见 platform::mount_webview）。
+  let webview = match crate::platform::mount_webview(builder, &window)
   {
     Ok(w) => w,
     Err(e) => platform::fatal(&format!(
@@ -84,7 +142,10 @@ fn run_master() {
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;
     match event {
-      tao::event::Event::UserEvent(FormEvent::Pack { url, icon }) => master.on_pack(url, icon),
+      tao::event::Event::UserEvent(FormEvent::Pack { url, icon }) => start_pack(&proxy, url, icon),
+      tao::event::Event::UserEvent(FormEvent::PackDone { out, result, icon_note }) => {
+        master.on_pack_done(&out, result, &icon_note);
+      }
       tao::event::Event::WindowEvent {
         event: tao::event::WindowEvent::CloseRequested,
         ..
@@ -119,20 +180,18 @@ fn build_master_window(
   builder.build(event_loop).map_err(|e| format!("创建母版窗口失败：{e}"))
 }
 
-/// 母版运行时状态（窗口存活期持有）。
-struct Master {
-  webview: Option<WebView>,
-  #[allow(dead_code)]
-  _window: tao::window::Window,
-}
-
-impl Master {
-  /// 执行打包并回报状态。阻塞 UI 数秒（纯本地复制+注入，无网络等待）。
-  fn on_pack(&mut self, url: String, icon: Option<Vec<u8>>) {
-    let filename = ui::product_filename(&url);
-    let out_dir = dir_of_current_exe();
-    let out = out_dir.join(&filename);
-
+/// 打包转后台线程执行，完成经 proxy 回投 PackDone。事件循环线程只做 UI——
+/// 阻塞它 = GDK 停止回应 _NET_WM_PING = 桌面会话「未响应」（Linux 实测被
+/// GNOME 判死）。防重复提交由表单按钮 disabled 承担，PackDone（set_status）解锁。
+/// 产物路径 = master 所在目录/product_filename(url)。
+fn start_pack(
+  proxy: &tao::event_loop::EventLoopProxy<FormEvent>,
+  url: String,
+  icon: Option<Vec<u8>>,
+) {
+  let out = dir_of_current_exe().join(ui::product_filename(&url));
+  let proxy = proxy.clone();
+  std::thread::spawn(move || {
     // 图标可选：None / 解码失败 → 产物用 w2a 默认图标，不阻塞打包
     let icon_note = match icon.as_deref().and_then(tail_core::decode_png) {
       Some((w, h, _)) => format!("，图标 {w}x{h}"),
@@ -144,12 +203,37 @@ impl Master {
         }
       }
     };
+    let result = platform::pack(&out, &url, icon)
+      .map(|b| b.size)
+      .map_err(|e| e.to_string());
+    let _ = proxy.send_event(FormEvent::PackDone { out, result, icon_note });
+  });
+}
 
-    match platform::pack(&out, &url, icon) {
-      Ok(result) => {
-        let kb = result.size as f64 / 1024.0;
+/// 母版运行时状态（窗口存活期持有）。
+struct Master {
+  webview: Option<WebView>,
+  #[allow(dead_code)]
+  _window: tao::window::Window,
+}
+
+impl Master {
+  /// 打包完成回执（后台线程 → PackDone → 主线程）：状态回写并恢复打包按钮。
+  fn on_pack_done(&mut self, out: &std::path::Path, result: Result<u64, String>, icon_note: &str) {
+    match result {
+      Ok(bytes) => {
+        let kb = bytes as f64 / 1024.0;
+        // Linux 产物是 .deb（ar 归档，不是可执行文件）：完成后独占一行给出
+        // **绝对路径**安装命令——相对 ./<name> 在用户当前 cwd 不是产物目录时
+        // 照抄即失败（实测：产物在 dist/，终端在 ~）。chmod +x 直接执行必报
+        // `!<arch>` 语法错误。apt 接受绝对路径的 .deb（参数含 / 即按文件处理）。
+        let hint = if cfg!(target_os = "linux") {
+          format!("\n安装（deb 是软件包，不可直接执行）：sudo apt install {}", out.display())
+        } else {
+          String::new()
+        };
         self.set_status(
-          &format!("完成：{}（{:.0} KB{}）", result.exe.display(), kb, icon_note),
+          &format!("完成：{}（{:.0} KB{}）{}", out.display(), kb, icon_note, hint),
           true,
         );
       }
@@ -189,12 +273,26 @@ mod tests {
   use super::*;
 
   #[test]
-  fn product_filename_sanitizes_host() {
-    assert_eq!(ui::product_filename("https://example.com"), "example.com.exe");
-    assert_eq!(ui::product_filename("https://a.b/c?d=1"), "a.b.exe");
-    // 非 ASCII 字符替换为下划线
-    let n = ui::product_filename("https://中文站.com");
-    assert!(n.ends_with(".com.exe"));
-    assert!(n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'));
+  fn product_filename_matches_install_name() {
+    // 文件名 = 安装名：Windows = <host>.exe（PE 单文件）；Linux = <Debian 包名>.deb
+    // （包名 = host 本身，见 platform/linux.rs）。同一名字贯穿装/用/卸，
+    // `apt install ./<文件名>` 后 `apt remove <文件名去 .deb>` 照抄即可。
+    let n = ui::product_filename("https://example.com");
+    #[cfg(target_os = "windows")]
+    {
+      assert_eq!(n, "example.com.exe");
+      // 非 ASCII 字符替换为下划线（Windows 文件名允许）
+      let m = ui::product_filename("https://中文站.com");
+      assert!(m.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+      assert_eq!(n, "example.com.deb");
+      assert_eq!(ui::product_filename("http://127.0.0.1:8100"), "127.0.0.1-8100.deb");
+      // 退化 host（首字符非字母数字）：包名回退 web2app- 前缀保 dpkg 合规
+      let m = ui::product_filename("https://中文站.com");
+      assert!(m.starts_with("web2app-") && m.ends_with(".deb"), "got: {m}");
+      assert!(m[..m.len() - 4].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'));
+    }
   }
 }

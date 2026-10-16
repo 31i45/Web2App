@@ -16,6 +16,13 @@ tao = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 webview2-com = { workspace = true }
 
+# Linux-only：GTK 外壳（弹窗顶层窗、全屏切换）需要 gtk-rs 类型。
+# 非新增依赖——`gtk` 早已由 tao/wry 传递引入并在 Cargo.lock 中锁定（0.18.2），
+# 此处只是把它变为可直接引用（依赖图不变）。gtk-rs 链接系统 libgtk-3（非内嵌引擎），
+# 不增产物体积，符合设计文档 §3.4 对 Linux 侧「gtk 为系统库链接」的说明。
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [dev-dependencies]
 png = { workspace = true }
 

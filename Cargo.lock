@@ -153,8 +153,9 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "child"
-version = "2.1.1"
+version = "3.0.0"
 dependencies = [
+ "gtk",
  "png",
  "tail-core",
  "tao",
@@ -1132,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "master"
-version = "2.1.1"
+version = "3.0.0"
 dependencies = [
  "png",
  "tail-core",
@@ -1959,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "tail-core"
-version = "2.1.1"
+version = "3.0.0"
 dependencies = [
  "png",
 ]

@@ -22,6 +22,9 @@ fn main() {
     // 产品名 "Web2App"，切断「内部架构角色名 → 用户可见身份」的泄漏。
     res.set("FileDescription", "Web2App");
     res.set("ProductName", "Web2App");
+    // 事实身份：作者句柄与许可证均取自真实信息，不编造邮箱/公司
+    res.set("CompanyName", "31i45 (https://github.com/31i45/Web2App)");
+    res.set("LegalCopyright", "MIT License");
     if let Err(e) = res.compile() {
         println!("cargo:warning=winres failed: {e}");
     }

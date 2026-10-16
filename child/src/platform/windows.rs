@@ -267,6 +267,24 @@ pub(crate) fn install_keys(webview: &WebView, proxy: EventLoopProxy<ChildEvent>)
 }
 
 // ============================================================================
+// WebView 挂载（接缝项）
+// ============================================================================
+
+/// 把构建好的 WebView 挂到窗口上：Windows **直通** wry 的通用 `build(window)`。
+///
+/// 直通即等价于接线前的 `builder.build(window)`——Windows 行为零变更。之所以抽出
+/// 同名接缝项：Linux 侧**不能**走这条通用路径（wry 的 `webkitgtk` 后端通用 `build`
+/// 只接受 Xlib 句柄，Wayland 会话下直接失败），必须改用 `build_gtk` 挂到 GTK 容器，
+/// 见 `platform/linux.rs` 同名项文档。两份实现签名一致 → 调用点（`webview.rs`）
+/// 平台无关（§3.4：平台判断只在 `platform/`）。
+pub(crate) fn mount_webview<'a>(
+  builder: wry::WebViewBuilder<'a>,
+  window: &'a tao::window::Window,
+) -> Result<WebView, wry::Error> {
+  builder.build(window)
+}
+
+// ============================================================================
 // External：交给系统默认程序
 // ============================================================================
 

@@ -58,6 +58,9 @@ fn main() {
   res.set_icon(&icon);
   res.set("FileDescription", "Web2App");
   res.set("ProductName", "Web2App");
+  // 事实身份：作者句柄与许可证均取自真实信息，不编造邮箱/公司
+  res.set("CompanyName", "31i45 (https://github.com/31i45/Web2App)");
+  res.set("LegalCopyright", "MIT License");
   if let Err(e) = res.compile() {
     println!("cargo:warning=winres failed: {e}");
   }

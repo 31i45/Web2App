@@ -175,6 +175,19 @@ pub(crate) use crate::builder::pack;
 pub(crate) use crate::sign::maybe_sign;
 pub(crate) use crate::winicon::inject_file_icon;
 
+// ============================================================================
+// WebView 挂载（child 侧同名接缝项 D1 的 master 版：Windows 直通）
+// ============================================================================
+
+/// 把表单 WebView 挂到窗口——Windows 直通 wry 通用 `build(window)`（句柄即
+/// HWND，无平台差异）。Linux 侧同名函数走 `build_gtk`（见 `platform/linux.rs`）。
+pub(crate) fn mount_webview<'a>(
+  builder: wry::WebViewBuilder<'a>,
+  window: &'a tao::window::Window,
+) -> Result<wry::WebView, wry::Error> {
+  builder.build(window)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

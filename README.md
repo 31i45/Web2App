@@ -1,32 +1,40 @@
 # Web2App
 
-Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定义图标），生成单文件桌面应用。
+Web→桌面应用打包器。输入网页 URL（可选自定义图标），生成桌面应用：Windows 单文件 `.exe`，Linux 原生 `.deb`。
 
-受开源项目 https://github.com/tw93/Pake 和小暖科技的 SiteNative 项目启发。
+受开源项目 https://github.com/tw93/Pake 和小暖科技的 SiteNative 项目启发，但绝对是全网最轻最小最原生的 Web→桌面应用打包器。
 
 ## 快速开始
 
-从 [Releases](https://github.com/31i45/Web2App/releases) 下载 `web2app.exe`（CI 构建，附 SHA256SUMS 校验），或本地构建：
+**Windows**：从 [Releases](https://github.com/31i45/Web2App/releases) 下载 `web2app.exe`（CI 构建，附 SHA256SUMS 校验），或本地构建：
 
 ```powershell
 .\build.ps1          # 一键构建（child → 测试 → clippy → master → 装配）
 .\dist\web2app.exe  # 运行打包器
 ```
 
-母版界面三元素：**网页 URL 输入框、图标选择（可选）、打包按钮**（回车也可提交）。点击「打包」，产物生成在母版所在目录（文件名 = URL host，如 `example.com.exe`）。选图走浏览器原生 `input[type=file]`+`FileReader`，图片字节经 IPC 传给原生，不依赖绝对路径。
+**Linux**（x86_64，需 WebKitGTK 4.1 运行环境）：
+
+```bash
+./build.sh           # 一键构建（同 Windows 门禁口径）
+./dist/web2app       # 运行打包器
+```
+
+母版界面三元素：**网页 URL 输入框、图标选择（可选）、打包按钮**（回车也可提交）。点击「打包」，产物生成在母版所在目录（文件名 = URL host，如 `example.com.exe` / `example.com.deb`）。选图走浏览器原生 `input[type=file]`+`FileReader`，图片字节经 IPC 传给原生，不依赖绝对路径。
 
 ## 使用产物
 
-- 直接双击运行 → 打开目标网页的桌面应用窗口
-- Explorer 文件列表显示用户自定义图标（无图标则显示 w2a 默认图标）
-- 标题栏与任务栏显示用户图标（无图标则显示 w2a 默认图标）
+**Windows**：直接双击运行；Explorer 文件列表、标题栏与任务栏均显示用户自定义图标（无图标则显示 w2a 默认图标）。
+
+**Linux**：`sudo apt install ./<host>.deb` 安装后，应用菜单出现启动项（含自定义图标），也可终端直接输入 `<host>` 运行；`sudo apt remove <host>` 卸载。文件名与包名同名，装/用/卸一条命令链。
 
 ## 运行时要求
 
-| 要求 | 说明 |
-|---|---|
-| WebView2 Runtime | [下载](https://developer.microsoft.com/microsoft-edge/webview2/)（Win11 自带，Win10 可能需手动安装） |
-| 代码签名 | **可选**：未签名产物可正常运行，但 SmartScreen 会显示警告；签名后无警告 |
+| 平台 | 要求 | 说明 |
+|---|---|---|
+| Windows | WebView2 Runtime | [下载](https://developer.microsoft.com/microsoft-edge/webview2/)（Win11 自带，Win10 可能需手动安装） |
+| Windows | 代码签名 | **可选**：未签名产物可正常运行，但 SmartScreen 会显示警告；签名后无警告 |
+| Linux | 无手动步骤 | `.deb` 的 Depends 声明完整依赖链（`libwebkit2gtk-4.1-0`、`libgtk-3-0`、`gstreamer1.0-libav`、`gstreamer1.0-plugins-bad`），`apt install` 自动补齐 |
 
 ### 关于代码签名
 
@@ -45,6 +53,7 @@ Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定�
 | 指标 | 目标 | 实测 |
 |---|---|---|
 | child 体积（用户分发的产物） | < 1 MB | ~700 KB（随工具链微漂移） |
+| Linux .deb 体积 | < 1 MB | ~430 KB（依赖系统 WebKitGTK，零内嵌浏览器） |
 | master 体积（打包器） | < 2 MB | ~1.5 MB（内嵌 child 模板） |
 | 冷启动 | < 2 s | 秒级（经验值，无自动化基准） |
 | 关闭残留 | 无 | 进程/WebView2 子进程全部退出 |
@@ -52,7 +61,7 @@ Windows 单文件 Web→桌面应用打包器。输入网页 URL（可选自定�
 
 ## 架构
 
-v2 采用三 crate workspace 结构，实现「子应用结构性不可繁殖」与「单文件产物」的双重约束：
+v3 采用三 crate workspace 结构，实现「子应用结构性不可繁殖」与「单文件产物」的双重约束：
 
 ```
 tail-core/        # 纯逻辑层：尾部协议解析与编码、PNG 解码、URL 工具（零 OS 依赖，可任意宿主单测）
@@ -115,7 +124,7 @@ CRC32（IEEE 802.3）覆盖 payload + 长度 + 版本字节，尾部被截断或
 
 实测（tao 0.37 + wry 0.57/WebView2）：单条 `WM_CLOSE` 路径下（Alt+F4、任务栏「关闭窗口」、`taskkill` 无 `/F`、UI 自动化），tao 的 `CloseRequested` 事件可能永不派发——消息被 WebView2 嵌套 COM 消息泵吞没，进程 30s+ 不自退。
 
-v2 采用两层确定性兜底：
+v3 采用两层确定性兜底：
 - **WNDPROC 哨兵**（`child|master::platform::install_close_watchdog`）：在 WebView 构建前替换窗口过程，`WM_CLOSE` 在消息进入框架之前即被捕获，武装看门狗后无条件透传 tao 原过程，事件链无损。
 - **看门狗线程**（`child|master::platform::quit_watchdog`）：独立线程 sleep 300ms 后 `process::exit(0)`，绕开消息泵竞争，给出确定退出上限。
 
@@ -138,48 +147,34 @@ wry 默认关闭了一批 WebView2 原生特性，产物按「桌面浏览器等
 
 ## 平台策略
 
-v2 转向 **Windows-only** 长期商用，Linux/macOS 平台不再维护。社区可基于 v1 自行 fork 移植。
+| 平台 | 产物 | 状态 |
+|---|---|---|
+| Windows | 单文件 `.exe` | 主线，完整支持 |
+| Linux | 原生 `.deb`（Debian 系） | v3 已实现，为国产桌面操作系统服务 |
+| macOS | `.app` | 无真机环境，暂不实现，等待社区支持 |
 
-这一决策基于技术可行性与商业性价比的综合评估，而非偏好：
+### Windows：单文件主线
 
-### 1. WebView 后端的成熟度差异
+Web2App 的核心承诺（单文件、自定义图标、零依赖）在 Windows 上完美实现：WebView2 在 Win11 预装、微软官方维护、API 稳定；PE + 尾部追加配置 = 真单文件；文件图标经 `UpdateResource` 注入 `.rsrc` 节，产物仍是单文件。关闭确定性哨兵、winres 资源编译等均为 Windows 原生能力，做深做透。
 
-| 平台 | 后端 | 状态 | 问题 |
-|---|---|---|---|
-| Windows | WebView2 | Win11 预装，微软官方维护，API 稳定 | 无 |
-| macOS | WKWebView | 系统自带，Apple 维护 | wry 需额外平台依赖；图标/窗口控制 API 与 Windows 差异大 |
-| Linux | WebKitGTK | 需用户自行安装 `libwebkit2gtk-4.1-0` | 发行版碎片化（Ubuntu/Debian/Fedora/Arch 版本不一），无统一运行时保证 |
+### Linux：.deb 为国产桌面操作系统服务
 
-Windows 是唯一「运行时开箱即用 + API 稳定」的平台。Linux 上用户可能因缺 WebKitGTK 而无法启动，macOS 上窗口/图标行为需独立适配。
+Linux 无原生单文件方案（AppImage 依赖 FUSE 且部分发行版默认禁用），但 Linux 生态的惯例本就是包管理器安装——`.deb` 是 Debian 系的原生形态。v3 实现了完整的 Linux 打包链路：
 
-### 2. 单文件产物的可行性
+- **系统 WebKitGTK，零内嵌浏览器**：产物仅 ~430 KB，Depends 声明完整依赖链（`libwebkit2gtk-4.1-0`、`gstreamer1.0-libav` 等），`apt install` 自动补齐
+- **原生集成**：`.desktop` 启动项 + hicolor 图标进应用菜单；文件名与包名同名（`baidu.com.deb` → 包 `baidu.com`），装/用/卸一条命令链
+- **目标生态**：deepin、UOS、openKylin、麒麟等国产桌面操作系统，及 Ubuntu/Debian 全系
 
-Web2App 的核心承诺是**单文件产物**——用户拿到一个 exe，双击即运行，无安装、无辅助文件。这一承诺在三平台的实现难度天差地别：
+### macOS：暂不实现，等待社区
 
-- **Windows**：PE 文件 + 尾部追加配置 = 真单文件。文件图标通过 `UpdateResource` API 注入 `.rsrc` 节，产物仍是单文件。
-- **macOS**：应用必须是 `.app` bundle（目录结构，含 `Contents/MacOS/`、`Contents/Resources/`、`Info.plist`），无法单文件。自定义图标需替换 bundle 内的 `.icns` 并修改 `Info.plist`，破坏单文件承诺。
-- **Linux**：无原生单文件方案。AppImage 需 FUSE 支持且部分发行版默认禁用；`.deb`/`.rpm` 是包而非单文件；图标依赖 `.desktop` 文件 + 图标文件 + 桌面环境解析。要实现「单文件 + 自定义图标」在 Linux 上几乎无解。
-
-### 3. 构建与测试成本
-
-- **CI 矩阵膨胀**：三平台 × 三 crate workspace，构建时间与资源消耗成倍增长。
-- **行为差异**：每个平台的 WebView 对窗口生命周期、关闭消息、焦点、IME 的处理不同，关闭确定性等问题需在每个平台独立验证——tao/wry 在 Windows 上的 `WM_CLOSE` 吞没问题在 macOS/Linux 上是另一套机制。
-- **Linux 碎片化**：无法穷举所有发行版/桌面环境组合的测试，bug 报告会持续涌入而难以复现。
-
-### 4. 商业性价比
-
-- 桌面应用商用市场 Windows 占绝对多数，Linux/macOS 桌面用户占比低且对「单文件 exe」类工具需求有限。
-- 跨平台代码增加的复杂性会拖慢 Windows 端的迭代速度，反而损害主要用户的体验。
-- 聚焦单一平台可以做深做透——UpdateResource 图标注入、关闭确定性哨兵、winres 资源编译等都是 Windows 原生能力，在其他平台无法等价实现。
-
-### 结论
-
-Web2App 的核心价值（单文件、自定义图标、零依赖）在 Windows 上可以完美实现，在 Linux/macOS 上要么无法实现（单文件），要么成本极高（WebView 碎片化、构建测试矩阵）。放弃跨平台是为了把有限的精力集中在能把产品做到极致的平台上。
+`.app` 必须是 bundle 目录结构（`Contents/MacOS/`、`Info.plist`、`.icns`），与单文件承诺本质冲突；签名、公证与窗口行为均需真机验证。当前无 macOS 真机环境，暂不实现——欢迎社区基于现有 `platform/` 外壳抽象（`#[cfg]` 同名同签名模块）贡献 macOS 后端。
 
 ## 开发
 
+**Windows**：
+
 ```powershell
-cargo test --workspace    # 83 个单元测试（tail-core 44 + child 18 + master 21）
+cargo test --workspace    # 84 个单元测试（tail-core 42 + child 19 + master 23）
 .\build.ps1               # 一键发布构建（child → 测试 → clippy → master → 装配）
 .\audit.ps1               # 结构性不可繁殖静态审计（CI 同款门禁：字符串标记 / PE 映像数 / cargo tree）
 .\e2e.ps1                 # 端到端：身份/资源元数据、产物启动、零残留、裸模板不可运行、字节级模板一致性
@@ -188,4 +183,11 @@ cargo build -p child --release   # 构建 child（master 的前置依赖）
 cargo build -p master --release  # 构建 master（内嵌 child 模板）
 ```
 
-依赖：`wry 0.57`（default-features=false, features=devtools）、`tao 0.37`、`webview2-com 0.39`（宿主层 Alt+Home，版本对齐 wry 传递依赖）、`png 0.18`、`windows-sys 0.59`；构建期 `winres`（仅 Windows，不进运行时）。JSON/base64/CRC32 手写，零 serde。
+**Linux**（Debian 系；构建依赖 `libwebkit2gtk-4.1-dev libgtk-3-dev`，e2e 另需 `xvfb xdotool gstreamer1.0-libav`）：
+
+```bash
+./build.sh    # 一键发布构建（与 Windows 同门禁口径：child → 测试 → clippy → master → 装配）
+./e2e.sh      # 端到端 39 项断言：deb 构建 / 安装 / 图标 / 运行 / 右键菜单 / 卸载全链路
+```
+
+依赖：`wry 0.57`（default-features=false, features=`devtools`、`os-webview`、`x11`）、`tao 0.37`、`webview2-com 0.39`（宿主层 Alt+Home，版本对齐 wry 传递依赖）、`png 0.18`、`windows-sys 0.59`（仅 Windows 目标）；构建期 `winres`（仅 Windows 目标，不进运行时）。JSON/base64/CRC32 手写，零 serde。

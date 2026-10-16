@@ -13,7 +13,7 @@
 | 目标 | 在 Windows 之外，原生实现 Linux（`.deb`）与 macOS（`.app`）版 Web2App |
 | 硬约束 | Windows 主线**零行为回归**；不变量三平台一致；产物轻量（不含 WebView 引擎） |
 | 非目标 | ① 不追求"完美打开所有网站"；② 不做跨平台打包（各平台在自己 runner 产物）；③ 不做 AppImage / 免 root 旁路；④ 不把项目全流程外包给 AI |
-| 当前版本 | workspace `2.1.1`；crates：`tail-core` / `child` / `master` |
+| 当前版本 | workspace `3.0.0`；crates：`tail-core` / `child` / `master` |
 | 文档语言 | 中文正文；标识符、路径、命令保持英文 |
 
 **术语**

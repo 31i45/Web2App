@@ -65,10 +65,12 @@ jobs:
         shell: pwsh
         run: ./audit.ps1 -ChildPath target/release/child.exe -MasterPath dist/web2app.exe
 
-  # Linux 接缝（阶段 0b）：Windows 之外的平台外壳必须与 child/master 同签名可编译
-  # （门禁 G-0b：G-0a 保持绿 + Linux 编译绿，见 docs/CROSS_PLATFORM_DESIGN.md §7）。
-  # wry 的 Linux 后端经 pkg-config 链接系统 WebKitGTK/GTK → 必须装开发库。
-  # 本阶段只验编译/测试/clippy，不产出 .deb（打包属阶段 1 T-1-4）。
+  # Linux 接缝（阶段 0b）+ G-1 无头门禁（阶段 1）：平台外壳与 child/master 同签名
+  # 可编译、单测/clippy 全绿之外，再跑完整 G-1（docs/CROSS_PLATFORM_DESIGN.md §7）——
+  # ELF 结构审计（audit.ps1 Linux 分支）+ 无头 e2e（按键 × 焦点矩阵 / data_directory
+  # 隔离 / deb 打包安装运行卸载）。wry 的 Linux 后端经 pkg-config 链接系统
+  # WebKitGTK/GTK → 必须装开发库；e2e 另需 Xvfb/xdotool，以及 control Depends 的
+  # 运行库（e2e 用 `dpkg -i` 直装，不解析依赖，故显式预装）。
   verify-linux:
     name: verify (ubuntu)
     runs-on: ubuntu-latest
@@ -81,13 +83,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install WebKitGTK dev libraries
+      - name: Install WebKitGTK dev libraries + e2e prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev xvfb xdotool gstreamer1.0-libav
 
       # 两阶段构建同 Windows：master 编译期内嵌 child（Linux 产物名为 child，无 .exe）。
-      - name: Build child (debug; master 编译期内嵌)
+      - name: Build child (debug; test/clippy 的前提)
         run: cargo build -p child --locked
 
       - name: Tests
@@ -95,6 +97,22 @@ jobs:
 
       - name: Clippy (zero warnings, warnings as errors)
         run: cargo clippy --all-targets --locked -- -D warnings
+
+      # 审计与 e2e 跑 release 产物（与 G-0a 口径一致：审计/演练对象 = 交付形态）。
+      # 两阶段显式先行：并行调度不保证 child 先于 master 完成（同上）。
+      - name: Release build (child -> workspace)
+        run: |
+          cargo build -p child --release --locked
+          cargo build --workspace --release --locked
+
+      # G-1：结构性不可繁殖审计（Linux 分支 = \x7fELF + e_shoff 映像计数）
+      - name: Structural audit (ELF)
+        shell: pwsh
+        run: ./audit.ps1 -ChildPath target/release/child -MasterPath target/release/web2app
+
+      # G-1：无头门禁（脚本自带 Xvfb 起停；全部以 exit code 判定）
+      - name: E2E gate (headless Xvfb)
+        run: CHILD=target/release/child MASTER=target/release/web2app bash e2e.sh
 
   # 发布（仅 v* 标签）：Windows 单目标
   build:

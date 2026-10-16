@@ -50,7 +50,7 @@ pub fn form_html() -> &'static str {
     color: #fff; background: #2f6bff; border: none; border-radius: 9px;
   }
   button:hover { background: #2a5fe8; }
-  .status { margin-top: 16px; font-size: 13px; color: #7ee0a3; min-height: 18px; word-break: break-all; }
+  .status { margin-top: 16px; font-size: 13px; color: #7ee0a3; min-height: 18px; word-break: break-all; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -112,9 +112,18 @@ pub fn form_html() -> &'static str {
 </html>"#
 }
 
-/// 从表单 URL 推导产物文件名：安全 host + .exe（Windows-only）。
+/// 产物文件名 = 安装名（同一名字贯穿「装 → 用 → 卸」，命令可照抄）：
+/// Windows = `<host>.exe`（PE 单文件，sanitize 规则见 tail_core::sanitize_host）；
+/// Linux = `<Debian 包名>.deb`（包名规则见 platform/linux.rs `package_name`，
+/// 即 `<host>`；dpkg 不合规的退化 host 回退 `web2app-` 前缀）。
+#[cfg(target_os = "windows")]
 pub fn product_filename(url: &str) -> String {
   format!("{}.exe", tail_core::sanitize_host(url))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn product_filename(url: &str) -> String {
+  format!("{}.deb", crate::platform::package_name(url))
 }
 
 /// 解析母版表单的 IPC 消息：`pack:<url>\n<base64 图标>`（图标行可缺失）。

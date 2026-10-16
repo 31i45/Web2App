@@ -3,7 +3,7 @@ members = ["tail-core", "child", "master"]
 resolver = "2"
 
 [workspace.package]
-version = "2.1.1"
+version = "3.0.0"
 edition = "2021"
 license = "MIT"
 
