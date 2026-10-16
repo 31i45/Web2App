@@ -9,7 +9,14 @@ license = "MIT"
 
 [workspace.dependencies]
 tail-core = { path = "tail-core" }
-wry = { version = "0.57", default-features = false, features = ["devtools"] }
+# devtools：debug 构建的开发者工具（Windows WebView2 / Linux WebKitGTK 均支持）。
+# os-webview + x11：wry 的 Linux/BSD 后端开关——wry 的 build.rs 只在
+# `feature = "os-webview"` 且目标为 Linux/BSD 时置 `cfg(gtk)`，未开启则该后端
+# 整体不编译（正是 CI 首次 Linux 构建的失败原因）；`x11` 再启用 gdkx11/x11-dl
+# 与 `tao/x11`，使 X11 形态的窗口句柄可被接管。二者引用的依赖在 wry 内均声明为
+# 「仅 Linux/BSD 目标」的可选依赖 → Windows 目标下启用它们是空操作（不进依赖图、
+# 不影响产物），且这正是 wry 的默认特性组合，故跨平台统一开启。
+wry = { version = "0.57", default-features = false, features = ["devtools", "os-webview", "x11"] }
 tao = "0.37"
 png = "0.18"
 # 宿主层 Alt+Home 需要 `ICoreWebView2Controller::add_AcceleratorKeyPressed`，
