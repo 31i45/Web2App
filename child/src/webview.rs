@@ -40,6 +40,10 @@ pub enum ChildEvent {
   /// 页面内轻提示（下载反馈等）。
   Toast(String),
   /// 宿主层 Alt+Home 命中 → 触发页面回首页动作（见 `platform` 的按键外壳）。
+  ///
+  /// Linux 阶段 0b 无产出者（`platform::install_keys` 为 no-op，待阶段 1 T-1-2
+  /// 接线；期间页面层 `keydown` 仍覆盖顶层帧的 Alt+Home）→ 显式豁免 dead_code。
+  #[allow(dead_code)]
   GoHome,
 }
 
