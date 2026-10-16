@@ -243,10 +243,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # download-artifact@v4 无 name 时按 artifact 名建子目录（dist/bin-windows/、
+      # dist/bin-linux/）→ merge-multiple 平铺合并进 dist/，产物文件名各不相同无冲突。
       - name: Download all platform binaries
         uses: actions/download-artifact@v4
         with:
           path: dist
+          merge-multiple: true
 
       - name: Generate checksums
         run: |
