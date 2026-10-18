@@ -104,18 +104,26 @@ master/src/
 每个平台模块**必须提供同名同签名**的下列项（缺一即编译失败，这是刻意设计）：
 
 ```rust
-pub(crate) fn data_dir(sub: &str) -> PathBuf;          // INV-4 隔离
-pub(crate) fn install_keys(webview: &WebView, proxy: EventLoopProxy<ChildEvent>, hwnd: RawWindowHandleInfo);
-pub(crate) fn create_popup(url: &str, feat: NewWindowFeatures, home: &str) -> Option<NewWindowResponse>;
+pub(crate) fn data_dir(sub: &str) -> PathBuf;
+pub(crate) fn fatal(msg: &str) -> !;
+pub(crate) fn quit_watchdog();
+pub(crate) fn install_close_watchdog(window: &tao::window::Window);
+pub(crate) fn install_keys(webview: &WebView, proxy: EventLoopProxy<ChildEvent>);
+pub(crate) fn shell_open(url: &str);
+pub(crate) fn open_external_if_http(url: &str);
+pub(crate) fn create_popup(url: &str, features: NewWindowFeatures, home: &str) -> Option<NewWindowResponse>;
 pub(crate) fn navigate_popup(handle: isize, url: &str);
 pub(crate) fn close_all_popups();
 pub(crate) fn set_fullscreen(handle: isize, on: bool);
-pub(crate) fn shell_open(url: &str);
-pub(crate) fn fatal(msg: &str) -> !;
-pub(crate) fn install_close_watchdog(handle: isize);
+pub(crate) fn popup_ipc(handle: isize, action: PopupIpc);
+pub(crate) fn mount_webview<'a>(builder: WebViewBuilder<'a>, window: &'a tao::window::Window) -> Result<WebView, wry::Error>;
+pub(crate) fn document_start_script() -> Option<&'static str>;
 ```
 
-`master` 侧同理：`pack(out: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result<BuildOutput>` + `maybe_sign(path: &Path) -> io::Result<()>`。
+> 上表已与 `docs/PLATFORM_SEAM_NOTES.md` §1 定稿签名对齐（含 D1–D8 全部偏差收口）；
+> 逐条偏差理由以接缝笔记 §2 为准。
+
+`master` 侧同理：`pack(out: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result<BuildOutput>` + `inject_file_icon(exe: &Path, png: &[u8]) -> Result<(), String>` + `maybe_sign(exe: &Path) -> Result<(), String>` + `mount_webview`（child 侧同型）。
 
 ### 3.4 编码规范（硬性）
 

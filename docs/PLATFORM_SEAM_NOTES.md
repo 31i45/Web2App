@@ -359,6 +359,27 @@ Ctrl 后返回 `Stop`——既执行缩放又阻断 `scroll-event` 发射（页�
 重载归位）、Ctrl+=/Ctrl+-/Ctrl+0/Ctrl+滚轮（夹具 `resize` 上报 `innerWidth`，按区间
 断言视口缩放），弹窗 F5 抽样一条。
 
+### 3.10 L1：Linux 弹窗特征缺失（`window.open` 带尺寸/位置特征不可识别）
+
+**结论（已知限制，非退化）**：Linux 上 `window.open(url, '_blank', 'width=…,height=…')`
+**无法与「普通链接」区分**——带特征的 http(s) 弹窗请求统一按无特征规则归入
+`SameTab`（同站就地）/ `External`（跨站外发），**不会**走应用内 `Popup` 窗口管线；
+`Popup` 分支仅保留规则 1 的空白窗路径（`window.open("about:blank", …)`，e2e 夹具即此）。
+
+**根因（wry 0.57 平台事实，源码已核对）**：`webkitgtk` 后端注册新窗口处理器时把
+`NewWindowFeatures { size: None, position: None, … }` **硬编码**
+（`wry/src/webkitgtk/mod.rs`，`connect_create` 回调内），不转发 WebKit 的
+`WindowFeatures`；而宿主判定 `has_popup_features = size.is_some() || position.is_some()`
+（`webview.rs`）→ Linux 上恒为 `false`，`classify_new_window` 规则 2 的特征分支
+不可达。
+
+**为何不修**：修复须绕过 wry 公共 API 直接对接 webkit2gtk 原生信号并自解析特征串，
+复杂度与维护代价远超收益（铁律：不为解决小瑕疵付出太多）。Windows 侧不受影响
+（WebView2 如实转发特征）。行为等价于阶段 1 前现状，非本次回归。
+
+**e2e 边界**：`e2e.sh` 弹窗段（含 [1b] 弹窗 F5 抽样）仅覆盖空白窗路径——这正是
+Linux 上唯一可达的应用内弹窗形态；特征弹窗路径在 Windows 侧由 WebView2 覆盖。
+
 ---
 
 ## 4. 平台无关层（不得出现平台判断）
