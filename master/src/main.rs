@@ -77,7 +77,7 @@ fn cli_pack(args: impl Iterator<Item = String>) {
     },
     None => None,
   };
-  let out = out.unwrap_or_else(|| dir_of_current_exe().join(ui::product_filename(&url)));
+  let out = out.unwrap_or_else(|| default_output_path(&url));
   match crate::platform::pack(&out, &url, icon) {
     Ok(b) => println!("OK {} ({} bytes)", b.exe.display(), b.size),
     Err(e) => {
@@ -186,7 +186,7 @@ fn start_pack(
   url: String,
   icon: Option<Vec<u8>>,
 ) {
-  let out = dir_of_current_exe().join(ui::product_filename(&url));
+  let out = default_output_path(&url);
   let proxy = proxy.clone();
   std::thread::spawn(move || {
     // 图标可选：None / 解码失败 → 产物用 w2a 默认图标，不阻塞打包
@@ -265,6 +265,14 @@ fn dir_of_current_exe() -> std::path::PathBuf {
     .ok()
     .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+/// 产物默认输出路径：master 所在目录 / product_filename(url)。
+///
+/// CLI（无 `--out` 覆盖时）与 GUI 表单共用——产物路径规则单点持有，
+/// 未来调整命名/落盘策略改此一处即生效。
+fn default_output_path(url: &str) -> std::path::PathBuf {
+  dir_of_current_exe().join(ui::product_filename(url))
 }
 
 #[cfg(test)]
