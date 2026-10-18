@@ -54,6 +54,35 @@ pub fn classify_new_window(url: &str, opener_host: &str, has_popup_features: boo
   NewWindowAction::External
 }
 
+/// 弹窗 ipc 消息要求的动作（见 [`parse_popup_ipc`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PopupIpc {
+  /// 页面请求关闭本弹窗（覆盖后的 `window.close()`）。
+  Close,
+  /// 本弹窗的 HTML5 全屏状态变化。
+  Fullscreen(bool),
+}
+
+/// 解析弹窗 ipc 消息体 `<id>:<kind>[:<arg>]`（`w2a:popup:` 前缀由调用方剥离）。
+///
+/// 为什么消息自带 id：Linux 上弹窗的 ipc 消息**不走弹窗自己的处理器**，而被路由到主窗
+/// 处理器（实测，见 `docs/PLATFORM_SEAM_NOTES.md` §3.7）——故脚本以 id 标记来源，主窗
+/// 处理器据此把动作回投到对应弹窗（一组弹窗同时存在时不能靠「最近一个」猜）。
+///
+/// 消息来自页面（不可信输入），格式非法一律 `None`（静默忽略，不 panic）；调用方据此
+/// 直接跳过。仅 Linux 会产生此类消息，Windows 侧不可达。
+pub(crate) fn parse_popup_ipc(msg: &str) -> Option<(isize, PopupIpc)> {
+  let (id, rest) = msg.split_once(':')?;
+  let id = id.parse::<isize>().ok()?;
+  let action = match rest {
+    "close" => PopupIpc::Close,
+    "fullscreen:1" => PopupIpc::Fullscreen(true),
+    "fullscreen:0" => PopupIpc::Fullscreen(false),
+    _ => return None,
+  };
+  Some((id, action))
+}
+
 /// 空白窗判定：空串或 `about:blank`（大小写不敏感）。
 pub(crate) fn is_blank(url: &str) -> bool {
   let t = url.trim();
@@ -197,5 +226,34 @@ mod tests {
     assert!(!same_site("b.com.evil.com", "b.com"));
     assert!(!same_site("", "b.com"));
     assert!(!same_site("b.com", ""));
+  }
+
+  #[test]
+  fn parse_popup_ipc_accepts_known_actions() {
+    assert_eq!(parse_popup_ipc("7:close"), Some((7, PopupIpc::Close)));
+    assert_eq!(parse_popup_ipc("12:fullscreen:1"), Some((12, PopupIpc::Fullscreen(true))));
+    assert_eq!(parse_popup_ipc("12:fullscreen:0"), Some((12, PopupIpc::Fullscreen(false))));
+  }
+
+  #[test]
+  fn parse_popup_ipc_rejects_malformed_page_input() {
+    // 页面可控输入：非 `id:动作` 形状一律拒绝，且不得 panic
+    for m in [
+      "",
+      "close",
+      ":close",
+      "x:close",
+      "3:",
+      "3:fullscreen",
+      "3:fullscreen:2",
+      "3:fullscreen:1:extra",
+      "3:close:extra",
+      "3:unknown",
+      "3 close",
+    ] {
+      assert_eq!(parse_popup_ipc(m), None, "{m}");
+    }
+    // 无 id 前缀的旧形状与主窗消息（`w2a:fullscreen:1` 剥前缀后为 `1`）不构成动作
+    assert_eq!(parse_popup_ipc("1"), None);
   }
 }

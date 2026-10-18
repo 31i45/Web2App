@@ -197,7 +197,16 @@ pub fn build_webview<'a>(
     // 关闭守卫仅主窗口需要：弹窗的 `window.close()` 应正常关窗。
     .with_initialization_script(CLOSE_GUARD)
     .with_ipc_handler(move |req| {
-      if let Some(flag) = req.into_body().strip_prefix("w2a:fullscreen:") {
+      let body = req.into_body();
+      // 弹窗消息（仅 Linux 产生）：见 [`POPUP_IPC_PREFIX`]——带 id 才能回投到发起它的
+      // 那个弹窗，交给平台外壳分发；Windows 侧不可达（其弹窗有独立 controller 与处理器）。
+      if let Some(msg) = body.strip_prefix(POPUP_IPC_PREFIX) {
+        if let Some((id, action)) = crate::popup::parse_popup_ipc(msg) {
+          crate::platform::popup_ipc(id, action);
+        }
+        return;
+      }
+      if let Some(flag) = body.strip_prefix("w2a:fullscreen:") {
         let _ = ipc_proxy.send_event(ChildEvent::Fullscreen(flag == "1"));
       }
     })
@@ -261,6 +270,13 @@ pub fn build_webview<'a>(
 pub(crate) const HOME_GO_SCRIPT: &str =
   "(function(){try{window.__w2aHome&&window.__w2aHome();}catch(e){}})();";
 
+/// 弹窗 ipc 消息前缀：`w2a:popup:<id>:<kind>[:<arg>]`（见 `popup::parse_popup_ipc`）。
+///
+/// 为什么弹窗消息要另立格式：Linux 上弹窗的 ipc 消息被路由到**主窗**处理器（实测，见
+/// `docs/PLATFORM_SEAM_NOTES.md` §3.7），若不带上发起窗口的 id，多弹窗并存时就无法判断
+/// 该关哪一个。主窗与 Windows 弹窗的消息格式不变（无此前缀）。
+const POPUP_IPC_PREFIX: &str = "w2a:popup:";
+
 /// 注入页面的初始化脚本：HTML5 全屏状态上报 + 页面内轻提示。
 ///
 /// 主窗口与弹窗共用（经 [`inject_script`] 与「回首页」脚本拼成一份注入）。
@@ -269,15 +285,31 @@ pub(crate) const HOME_GO_SCRIPT: &str =
 /// 注册在 document-created 时执行）。全屏只上报状态，真全屏由宿主完成——
 /// 主窗口走 tao `set_fullscreen`，弹窗走 `popup::set_fullscreen`（均为原生全屏，
 /// 因 WebView2 内部的全屏元素只填满 webview，不是真全屏）。
+///
+/// 消息体是否带 id 前缀取决于 `window.__w2aIpcTag`（仅 Linux 弹窗的宿主注入会设置在弹窗
+/// 文档上，见 `platform/linux.rs` 的 `popup_bind_script` 与 [`POPUP_IPC_PREFIX`]）——
+/// Linux 弹窗的消息会落到主窗处理器，不带 id 就无法回投。主窗与 Windows 弹窗的行为与
+/// 格式均不变。
 pub(crate) const INJECT_SCRIPT: &str = r#"
 (function () {
   if (window.__w2a) { return; }
   var api = {};
   window.__w2a = api;
 
+  // 消息体按来源加前缀：`window.__w2aIpcTag` 仅由 Linux 弹窗的宿主注入（见
+  // `platform/linux.rs` 的 `popup_bind_script`），主窗与 Windows 弹窗无此标记、
+  // 维持 `w2a:<kind>:<arg>`。
+  var send = function (kind, arg) {
+    var tag = window.__w2aIpcTag;
+    try {
+      window.ipc.postMessage(tag ? 'w2a:popup:' + tag + ':' + kind + ':' + arg
+                                 : 'w2a:' + kind + ':' + arg);
+    } catch (e) {}
+  };
+
   var notify = function () {
     var el = document.fullscreenElement || document.webkitFullscreenElement || null;
-    try { window.ipc.postMessage(el ? 'w2a:fullscreen:1' : 'w2a:fullscreen:0'); } catch (e) {}
+    send('fullscreen', el ? '1' : '0');
   };
   document.addEventListener('fullscreenchange', notify, true);
   document.addEventListener('webkitfullscreenchange', notify, true);
@@ -309,8 +341,10 @@ pub(crate) const INJECT_SCRIPT: &str = r#"
 ///
 /// wry 对 `WindowCloseRequested` 注册了 `DestroyWindow(hwnd)`，页面一旦调用
 /// `window.close()` 就会直接销毁主窗口并终结应用。浏览器语义是「非脚本打开的顶层窗
-/// 忽略关闭请求」；本应用主窗口从不由脚本打开，故对齐为无操作。弹窗**不**注入本脚本，
-/// 其 `window.close()` 仍正常关窗。
+/// 忽略关闭请求」；本应用主窗口从不由脚本打开，故对齐为无操作。弹窗**不**注入本脚本：
+/// Windows 侧其 `window.close()` 由 WebView2 `WindowCloseRequested → DestroyWindow` 正常
+/// 关窗；Linux 侧 WebKit 拒绝自建视图的关闭请求，改由 `platform/linux.rs` 的
+/// `popup_bind_script` 注入的脚本转发 IPC 给宿主关窗。
 const CLOSE_GUARD: &str = r#"
 (function () {
   try {

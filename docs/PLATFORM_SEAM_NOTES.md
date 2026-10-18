@@ -31,6 +31,7 @@
 | `navigate_popup` | `fn navigate_popup(handle: isize, url: &str)` |
 | `close_all_popups` | `fn close_all_popups()` |
 | `set_fullscreen` | `fn set_fullscreen(handle: isize, on: bool)` |
+| `popup_ipc` | `fn popup_ipc(handle: isize, action: crate::popup::PopupIpc)` |
 | `mount_webview` | `fn mount_webview<'a>(builder: wry::WebViewBuilder<'a>, window: &'a tao::window::Window) -> Result<wry::WebView, wry::Error>` |
 
 **各平台私有**（不进接缝面，仅在各自 `platform/<os>.rs` 内）：`VK_HOME` /
@@ -238,6 +239,48 @@ wry 0.57 无此 API（代价 > 收益，不做）。
 **VM 实测（Zorin，Xvfb + xdotool + 本地 `http.server`）**：`http://` 链接与 `data:` URL
 两种下载均落盘 `~/Downloads`（wry 对 `data:` 有文件名归一化分支），进程全程存活，
 未观察到挂起。
+
+### 3.7 Linux 弹窗：文档承载在发起方 UCM 上（注入通道 + ipc 回投）
+
+**结论**：Linux 弹窗**没有自己的注入与消息通道**——它的文档承载在**发起方（主窗）的
+`UserContentManager`** 上。故：
+
+1. 弹窗页的 `window.ipc`、`INJECT_SCRIPT`（全屏上报 / Alt+Home）与主窗的 `CLOSE_GUARD`
+   **均来自主窗 UCM**，在弹窗文档中同样生效；
+2. 反之，`create_popup` 在弹窗 `WebViewBuilder` 上注册的 UCM /
+   `with_initialization_script` / `with_ipc_handler` **从不生效**（实测：弹窗页读到的自建
+   标记为 `undefined`）；
+3. 弹窗页发出的 ipc 消息因此**由主窗处理器收到**，弹窗自身的处理器从不触发。
+
+**为什么**：`related_view` 是本平台的**硬性契约**——去掉后 WebKit 内部断言
+`WindowFeatures` abort（实测 SIGABRT），必须保留；而 `related view` 下 WebKit 以发起方的
+UCM 承载弹窗文档，弹窗 `WebViewBuilder` 传入的 UCM 被忽略。
+
+**由此产生的接缝设计**（`platform::popup_ipc` 为新增接缝项）：
+- **消息格式**：Linux 弹窗的消息为 `w2a:popup:<id>:<kind>[:<arg>]`，由主窗处理器按 id
+  回投（`webview.rs` 的 `POPUP_IPC_PREFIX` + `popup::parse_popup_ipc` →
+  `platform::popup_ipc(id, action)` → 本窗 `close_popup` / `set_fullscreen`）。带 id 是
+  必需的：一组弹窗并存时无法靠「最近一个」判断该关哪一个。主窗与 Windows 弹窗的消息格式
+  不变（无此前缀）。
+- **注入通道**：弹窗的「本窗标记」（`window.__w2aIpcTag`）与 `window.close()` 覆盖**不能**
+  用 doc-start 注入（本窗 UCM 不生效），改由宿主在**每次文档提交**时对本窗
+  `evaluate_script`（`popup_bind_script`，脚本内嵌本窗 id）。wry 的
+  `PageLoadEvent::Started` 在 webkitgtk 上映射为 `LoadEvent::Committed`，是本平台能拿到的
+  最早注入点；`evaluate_script` 为异步排队，实测在 `load` 之后、用户或定时触发的动作之前
+  落地（页面在解析期即自行 `window.close()` 的极端情形不覆盖）。
+- **为什么必须覆盖 `window.close()`**：WebKitGTK 拒绝非 `openedByDOM` 视图的关闭请求
+  （连 `close` 信号都不发出，见 `create_popup` 内注释），且主窗 `CLOSE_GUARD` 在弹窗文档中
+  同样生效（把它降级为无操作）→ 覆盖为「经 IPC 送回宿主」，即 Windows 侧
+  `WindowCloseRequested → DestroyWindow` 的 Linux 对等物。
+- Windows 侧无对应现象（弹窗各有独立 controller 与 ipc 处理器），故
+  `platform::popup_ipc` 在 Windows 是**不可达 no-op 存根**——与 Linux 的
+  `install_close_watchdog` 空实现同构。
+
+**VM 实测（Zorin，Xvfb + openbox + xdotool + 本地 `http.server`）**：
+1. 弹窗页 `window.close()` → GTK 顶层窗消失、主窗与进程存活、stderr 无 GTK critical
+   （对照：修复前弹窗存活、进程存活）；
+2. 弹窗页发出的 `fullscreen:1` → **弹窗**全屏（1280x800@0,0），主窗保持 1100x750
+   （对照：修复前主窗被全屏、弹窗不动）。
 
 ---
 

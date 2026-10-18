@@ -276,7 +276,7 @@ pub(crate) fn install_keys(webview: &WebView, proxy: EventLoopProxy<ChildEvent>)
 /// 同名接缝项：Linux 侧**不能**走这条通用路径（wry 的 `webkitgtk` 后端通用 `build`
 /// 只接受 Xlib 句柄，Wayland 会话下直接失败），必须改用 `build_gtk` 挂到 GTK 容器，
 /// 见 `platform/linux.rs` 同名项文档。两份实现签名一致 → 调用点（`webview.rs`）
-/// 平台无关（§3.4：平台判断只在 `platform/`）。
+/// 平台无关（§4：平台判断只在 `platform/`）。
 pub(crate) fn mount_webview<'a>(
   builder: wry::WebViewBuilder<'a>,
   window: &'a tao::window::Window,
@@ -494,6 +494,14 @@ pub(crate) fn close_all_popups() {
     unsafe { DestroyWindow(h) };
   }
 }
+
+/// no-op：Linux 专有的弹窗 ipc 分发（实现见 `platform/linux.rs` 同名函数）。
+///
+/// Windows 侧不可达：每个弹窗都有自己的 WebView2 controller 与**自己的** ipc 处理器
+/// （见 [`create_popup`]），消息不会落到主窗处理器，故 `webview.rs` 主窗处理器里的
+/// `w2a:popup:` 分支永不触发。参数仅用于与 Linux 侧同签名（调用点在 `webview.rs`，
+/// 平台无关，与 [`install_close_watchdog`] 在 Linux 侧为空实现同构）。
+pub(crate) fn popup_ipc(_handle: isize, _action: crate::popup::PopupIpc) {}
 
 /// 弹窗全屏切换（无边框覆盖所在显示器），退出时还原原样式与位置。
 ///

@@ -19,7 +19,7 @@ use wry::{
   WebViewExtUnix,
 };
 
-use crate::popup::NewWindowAction;
+use crate::popup::{NewWindowAction, PopupIpc};
 use crate::webview::ChildEvent;
 
 // ============================================================================
@@ -246,9 +246,44 @@ struct Popup {
 thread_local! {
   static POPUPS: RefCell<HashMap<isize, Popup>> = RefCell::new(HashMap::new());
   /// 弹窗句柄 id 分配器。GTK 侧没有可作 key 的原生句柄（与 Win32 的 HWND 不同），
-  /// 故自增分配；仅用于在 `navigate_popup` / `set_fullscreen` / `close_all_popups`
-  /// 之间标识弹窗，不暴露给页面。
+  /// 故自增分配；用于在 `navigate_popup` / `set_fullscreen` / `close_all_popups` 之间
+  /// 标识弹窗，并由宿主注入弹窗文档（`window.__w2aIpcTag`）供 ipc 消息回投（见 §3.7）。
   static NEXT_POPUP_ID: Cell<isize> = const { Cell::new(1) };
+}
+
+/// 生成弹窗的「本窗标记 + 关闭覆盖」脚本（每次文档提交时由宿主注入本窗，见 [`create_popup`]）。
+///
+/// 为什么不能用 `with_initialization_script`（VM 实测的平台事实，见
+/// `docs/PLATFORM_SEAM_NOTES.md` §3.7）：Linux 弹窗的 WebView 必须以 `related_view`
+/// 依附发起方（否则 WebKit 内部断言 `WindowFeatures` abort），而**承载文档的是发起方
+/// （主窗）的 `UserContentManager`**——弹窗自身 `WebViewBuilder` 上的 UCM（含 `wry`
+/// 注入的 `window.ipc` 与本窗初始化脚本）**从不生效**。故本窗唯一的注入通道是宿主在
+/// **文档提交**时对本窗 `evaluate_script`（wry 的 `PageLoadEvent::Started` 在 webkitgtk
+/// 上即 `LoadEvent::Committed`）。
+///
+/// 脚本做两件事，均内嵌本窗 `id`：
+/// 1. 置 `window.__w2aIpcTag`——主窗的 `INJECT_SCRIPT`（在弹窗文档中同样生效，见上）在
+///    `send` 处按该标记给消息追加 `w2a:popup:<id>:` 前缀，使主窗处理器能把消息回投本窗
+///    （见 [`popup_ipc`] 与 `webview::POPUP_IPC_PREFIX`）；
+/// 2. 覆盖 `window.close()`——WebKitGTK **拒绝**应用自建视图的关闭请求（页面非
+///    `openedByDOM`，连 `close` 信号都不发出，见模块内注释），且主窗的 `CLOSE_GUARD`
+///    在弹窗文档中同样生效（把它降级为无操作），故须覆盖为「经 IPC 送回宿主」，
+///    由 [`close_popup`] 销毁整窗——即 Windows 侧 `WindowCloseRequested → DestroyWindow`
+///    的 Linux 对等物。
+fn popup_bind_script(id: isize) -> String {
+  format!(
+    r#"(function () {{
+  window.__w2aIpcTag = {id};
+  try {{
+    Object.defineProperty(window, 'close', {{
+      value: function () {{
+        try {{ window.ipc.postMessage('w2a:popup:{id}:close'); }} catch (e) {{}}
+      }},
+      writable: true, configurable: true
+    }});
+  }} catch (e) {{}}
+}})();"#
+  )
 }
 
 /// 为 `Popup` 分支建独立 GTK 顶层窗并挂 WebView，返回交给 WebKit 的 `Create` 响应。
@@ -302,30 +337,32 @@ pub(crate) fn create_popup(
 
   // 弹窗自身的同站判定基准：随其导航更新（on_page_load 回填）。
   let host = Rc::new(RefCell::new(tail_core::host_of(url)));
-  // 嵌套弹窗也要能回首页：回调是 'static 的，故取所有权。
-  let script = crate::webview::inject_script(home);
   let home_for_nested = home.to_string();
   let title_window = window.clone();
   let host_for_load = Rc::clone(&host);
+  // 本窗「标记 + 关闭覆盖」脚本（每次文档提交注入，见 [`popup_bind_script`]）。
+  let bind_for_load = popup_bind_script(id);
 
   let mut builder = WebViewBuilder::new()
     // 刻意不 with_url：WebKit 会在本处理器的 `Create` 响应后自行导航到目标 URL
     //（与 Windows 的 WebView2 `SetNewWindow` 契约同构）。
+    // 不设 `with_initialization_script` / `with_ipc_handler`：本平台弹窗文档承载在
+    // 发起方（主窗）的 UCM 上，本窗 UCM 上的注入从不生效（见 [`popup_bind_script`]）。
     .with_hotkeys_zoom(true)
     .with_back_forward_navigation_gestures(true)
     .with_clipboard(true)
-    .with_initialization_script(script)
-    .with_ipc_handler(move |req| {
-      // HTML5 全屏：弹窗无 tao 事件循环，直接在本线程做 GTK 全屏切换。
-      if let Some(flag) = req.into_body().strip_prefix("w2a:fullscreen:") {
-        set_fullscreen(id, flag == "1");
-      }
-    })
     .with_document_title_changed_handler(move |title| {
       title_window.set_title(&title);
     })
     .with_on_page_load_handler(move |event, loaded| {
-      if matches!(event, wry::PageLoadEvent::Finished) {
+      if matches!(event, wry::PageLoadEvent::Started) {
+        // 文档已提交：注入本窗标记与关闭覆盖（从注册表取本窗 WebView 执行）。
+        POPUPS.with(|m| {
+          if let Some(p) = m.borrow().get(&id) {
+            let _ = p.webview.evaluate_script(&bind_for_load);
+          }
+        });
+      } else {
         *host_for_load.borrow_mut() = tail_core::host_of(&loaded);
       }
     })
@@ -353,6 +390,7 @@ pub(crate) fn create_popup(
       }
     })
     // 契约：新 WebView 必须与发起方 related（共享 web 进程与网络会话，见模块头）。
+    // **必需**：去掉后 WebKit 内部断言 `WindowFeatures` abort（实测）。
     .with_related_view(features.opener.webview);
   if cfg!(debug_assertions) {
     builder = builder.with_devtools(true);
@@ -433,6 +471,31 @@ pub(crate) fn set_fullscreen(handle: isize, on: bool) {
     } else {
       w.unfullscreen();
     }
+  }
+}
+
+/// 关闭指定弹窗（页面 `window.close()` 经 IPC 送达，见 [`popup_bind_script`]）。
+///
+/// 与 [`close_all_popups`] 同一 GTK 路径：先取窗口快照再 `gtk_window_close` → delete-event
+/// 未挂处理器时由 GTK 默认处理器**同步** `gtk_widget_destroy` → 就绪的 `connect_destroy`
+/// 摘除注册表项。先克隆窗口再离开借用作用域，避免持着 `POPUPS` 借用触发重入改表
+///（与 [`set_fullscreen`] 同构）。
+fn close_popup(handle: isize) {
+  let window = POPUPS.with(|m| m.borrow().get(&handle).map(|p| p.window.clone()));
+  if let Some(w) = window {
+    w.close();
+  }
+}
+
+/// 分发弹窗 ipc 消息（平台接缝项，见 `webview.rs` 的主窗处理器）。
+///
+/// 调用点特殊：消息来自**主窗**处理器——本平台弹窗文档承载在发起方 UCM 上，弹窗消息被
+/// 路由到主窗（见 [`popup_bind_script`]），故由主窗按消息内嵌的 id 回投到发起窗口。`handle`
+/// 指向已关闭或伪造的弹窗时各分支均为无操作（`POPUPS` 查不到即返回）。
+pub(crate) fn popup_ipc(handle: isize, action: PopupIpc) {
+  match action {
+    PopupIpc::Close => close_popup(handle),
+    PopupIpc::Fullscreen(on) => set_fullscreen(handle, on),
   }
 }
 
