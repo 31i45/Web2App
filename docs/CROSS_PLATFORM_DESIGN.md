@@ -157,10 +157,10 @@ pub(crate) fn install_close_watchdog(handle: isize);
 
 | 按键 | Windows 机制 | Linux 机制 | macOS 机制 |
 |---|---|---|---|
-| 回首页 | `AcceleratorKeyPressed` | `gtk::AccelGroup`/snooper（见 V-3） | `NSMenuItem` ⌘⇧H |
-| 后退 / 前进 | 引擎默认（须实测 V-1） | **必须接线**（优先组件级 `key-press-event`） | View 菜单 ⌘[ / ⌘] |
-| 刷新 | 引擎默认（V-1） | **必须接线** | View 菜单 ⌘R |
-| 缩放 ±/0 | `with_hotkeys_zoom` | `WebViewExtUnix::zoom` + 接线 | `setPageZoom` + 菜单 |
+| 回首页 | `AcceleratorKeyPressed` | 已接线（组件级 `key-press-event`，V-3 落定） | `NSMenuItem` ⌘⇧H |
+| 后退 / 前进 | 引擎默认（须实测 V-1） | 已接线（批次 4，同机制） | View 菜单 ⌘[ / ⌘] |
+| 刷新 | 引擎默认（V-1） | 已接线（批次 4，F5/Ctrl+R；硬刷新不支持） | View 菜单 ⌘R |
+| 缩放 ±/0 | `with_hotkeys_zoom` | 已接线（批次 4：wry `zoom` + Chromium 阶梯 + Ctrl+滚轮） | `setPageZoom` + 菜单 |
 | 查找 / 打印 | 须实测 V-1 | 自建 | 菜单项 |
 | 复制/粘贴/全选/撤销 | 内容层 | 内容层 | **依赖标准 Edit 菜单**（否则 ⌘C/V 失效） |
 | 视频全屏 | 注入桥 + 宿主全屏 | **不支持**：请求全屏即 SIGABRT（V-4），文档起始置 no-op | 原生支持 |

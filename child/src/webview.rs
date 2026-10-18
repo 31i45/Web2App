@@ -44,6 +44,42 @@ pub enum ChildEvent {
   /// 两平台的 `platform::install_keys` 均产出本事件（Windows `AcceleratorKeyPressed`、
   /// Linux 组件级 `key-press-event`，见 T-1-2）。
   GoHome,
+  /// 浏览器级按键动作（刷新 / 后退 / 前进 / 缩放）。
+  ///
+  /// 仅 Linux 的 `install_keys` 产生：这些键在 Windows 上由 WebView2 默认加速键
+  /// 覆盖（设计文档 §5.1），WebKitGTK 无浏览器级快捷键、必须宿主接线（批次 4）。
+  /// Windows 构建下从不构造，以 lint 豁免标注（非平台分支，行为两平台一致）。
+  #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+  HostKey(HostKey),
+}
+
+/// 浏览器级按键动作（不含回首页——`GoHome` 已是独立事件）。
+///
+/// 跨平台定义：枚举随 `ChildEvent` 两平台编译；动作值仅 Linux 产生（Windows
+/// 构建下仅被主循环匹配、从不构造，豁免 `dead_code`）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostKey {
+  Reload,
+  Back,
+  Forward,
+  ZoomIn,
+  ZoomOut,
+  ZoomReset,
+}
+
+/// 缩放阶梯（对齐 Chromium）：`zoom_step` 在当前级别基础上取相邻档。
+pub(crate) const ZOOM_STOPS: &[f64] =
+  &[0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0];
+
+/// 沿 [`ZOOM_STOPS`] 走一档（`dir` > 0 放大，< 0 缩小）；已到端点则停在端点。
+pub(crate) fn zoom_step(cur: f64, dir: i32) -> f64 {
+  const EPS: f64 = 1e-6;
+  if dir > 0 {
+    ZOOM_STOPS.iter().copied().find(|&z| z > cur + EPS).unwrap_or(ZOOM_STOPS[ZOOM_STOPS.len() - 1])
+  } else {
+    ZOOM_STOPS.iter().rev().copied().find(|&z| z < cur - EPS).unwrap_or(ZOOM_STOPS[0])
+  }
 }
 
 /// 打开一个 WebView 窗口并阻塞至窗口关闭。
@@ -87,6 +123,9 @@ pub fn open_webview(config: AppConfig) -> Result<(), String> {
     let _ = webview.set_theme(wry::Theme::Auto);
   }
 
+  // 主窗缩放级别（`zoom` 只设绝对值，当前档由宿主自持；初始 1.0 = WebKitGTK 默认）。
+  let mut zoom_level = 1.0f64;
+
   event_loop.run(move |event, _, control_flow| {
     *control_flow = ControlFlow::Wait;
     match event {
@@ -106,6 +145,29 @@ pub fn open_webview(config: AppConfig) -> Result<(), String> {
       Event::UserEvent(ChildEvent::GoHome) => {
         // 宿主层 Alt+Home（`accelerator`）回流到此：调用页面暴露的 `window.__w2aHome()`。
         let _ = webview.evaluate_script(HOME_GO_SCRIPT);
+      }
+      Event::UserEvent(ChildEvent::HostKey(key)) => {
+        // Linux 接线的浏览器级按键（Windows 由引擎默认覆盖，本分支不可达）。
+        // 导航/刷新经 JS（主帧执行，等价浏览器语义）；缩放走 wry 跨平台 `zoom`。
+        match key {
+          HostKey::Reload => {
+            let _ = webview.evaluate_script("location.reload()");
+          }
+          HostKey::Back => {
+            let _ = webview.evaluate_script("history.back()");
+          }
+          HostKey::Forward => {
+            let _ = webview.evaluate_script("history.forward()");
+          }
+          HostKey::ZoomIn | HostKey::ZoomOut => {
+            zoom_level = zoom_step(zoom_level, if key == HostKey::ZoomIn { 1 } else { -1 });
+            let _ = webview.zoom(zoom_level);
+          }
+          HostKey::ZoomReset => {
+            zoom_level = 1.0;
+            let _ = webview.zoom(1.0);
+          }
+        }
       }
       Event::WindowEvent {
         event: WindowEvent::CloseRequested,
@@ -620,6 +682,20 @@ mod tests {
         "阶段 1 页面层 keydown 必须与宿主层并存: {script}"
       );
     }
+  }
+
+  /// 缩放阶梯：上下走档、端点钳制、非档值的就近归位。
+  #[test]
+  fn zoom_step_walks_stops_and_clamps_ends() {
+    assert_eq!(zoom_step(1.0, 1), 1.1);
+    assert_eq!(zoom_step(1.1, 1), 1.25);
+    assert_eq!(zoom_step(1.0, -1), 0.9);
+    // 顶端/底端钳制
+    assert_eq!(zoom_step(5.0, 1), 5.0);
+    assert_eq!(zoom_step(0.25, -1), 0.25);
+    // 非档值（如外部因素改过的级别）就近落入相邻档
+    assert_eq!(zoom_step(1.05, 1), 1.1);
+    assert_eq!(zoom_step(1.05, -1), 1.0);
   }
 
   #[test]

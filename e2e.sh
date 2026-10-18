@@ -47,8 +47,33 @@ focus_and_click() { # focus_and_click <wid> <x> <y>
   DISPLAY=:99 xdotool mousemove --window "$1" "$2" "$3" 2>/dev/null
   DISPLAY=:99 xdotool click 1 2>/dev/null
 }
+# 轮询窗口标题直到形如 W:<n> 且 n（整数部分）落在开区间 (lo, hi)（约 5s 上限）。
+# 供 [1b] 缩放断言用：夹具在 zoom 引起的 resize 时把 innerWidth 写进标题。
+wait_width() { # wait_width <wid> <lo> <hi>
+  local wid="$1" lo="$2" hi="$3" i t w
+  for i in $(seq 50); do
+    t="$(DISPLAY=:99 xdotool getwindowname "$wid" 2>/dev/null || true)"
+    case "$t" in
+      W:*)
+        w="${t#W:}"; w="${w%%.*}"
+        [ -n "$w" ] && [ "$w" -gt "$lo" ] 2>/dev/null && [ "$w" -lt "$hi" ] 2>/dev/null && return 0
+        ;;
+    esac
+    sleep 0.1
+  done
+  echo "    (last title: '${t:-<none>}')" >&2
+  return 1
+}
+# 诊断 dump（[1b] 点击失效定位）：活动窗口 / 指针位置 / 目标窗几何 / 全窗树。
+dump_state() { # dump_state <wid>
+  echo "    (diag) active=$(DISPLAY=:99 xdotool getactivewindow 2>/dev/null || echo '?')" >&2
+  echo "    (diag) mouse: $(DISPLAY=:99 xdotool getmouselocation --shell 2>/dev/null | tr '\n' ' ')" >&2
+  echo "    (diag) geometry: $(DISPLAY=:99 xdotool getwindowgeometry --shell "$1" 2>/dev/null | tr '\n' ' ')" >&2
+  echo "    (diag) window tree:" >&2
+  DISPLAY=:99 xwininfo -root -tree 2>/dev/null | grep -E "^ +0x[0-9a-f]+" >&2
+}
 # 点击导航链接并等待生效（最多 3 次——首击可能被未就绪的 GTK/WebKit 吞掉，
-# 实测窗口出现即点会丢首击，dbg1 记录）。
+# 实测窗口出现即点会丢首击，dbg1 记录）。失败时 dump 现场供复盘。
 goto_away() { # goto_away <wid>
   local wid="$1" i
   for i in 1 2 3; do
@@ -56,6 +81,7 @@ goto_away() { # goto_away <wid>
     wait_title "$wid" AWAY && return 0
     sleep 0.5
   done
+  dump_state "$wid"
   return 1
 }
 # 发送 WM_DELETE_WINDOW（真实关闭路径；xdotool windowclose 会退化为强制销毁，
@@ -191,6 +217,13 @@ box.addEventListener("input",function(){document.title="TYPED:"+box.value});
 addEventListener("keydown",function(e){
   if(!e.altKey&&e.target.tagName!=="INPUT")document.title="PAGE_KEY:"+e.key});
 addEventListener("message",function(){document.title="MSG_FROM_IFRAME"});
+// 缩放观测（[1b]）：load 后才挂 resize——避免首载视口建立时的初始 resize 覆盖标题。
+addEventListener("load",function(){
+  addEventListener("resize",function(){document.title="W:"+innerWidth})});
+// pad 点击观测（[1b] 诊断）：e.target 恰为 pad 本体才改标题——点到链接不算
+// （链接导航优先），供「弹窗关闭后合成点击是否仍到达页面」的判定。
+document.getElementById("pad").addEventListener("click",function(e){
+  if(e.target.id==="pad")document.title="PADCLICK"});
 </script>'
 echo "${PAGE_TMPL/@TITLE@/HOME}" | sed "s|@OTHER@|away.html|" > "$TMP/web8100/home.html"
 echo "${PAGE_TMPL/@TITLE@/AWAY}" | sed "s|@OTHER@|home.html|" > "$TMP/web8100/away.html"
@@ -280,11 +313,73 @@ for i in $(seq 60); do
 done
 assert "popup window shows AWAY" test -n "$POPUP"
 if [ -n "$POPUP" ]; then
-  focus_and_click "$POPUP" 100 100
+  # 聚焦点击必须落在弹窗页面的 pad 安全区 (700,100)：夹具里 (100,100) 恰在
+  # nav-away(0-100)/nav-popup(100-200) 两条链接的边界上——误中 nav-popup 会在
+  # 弹窗里再触发 openPopup() 递归建出嵌套弹窗；若 300ms 内弹窗被 alt+Home 导航走，
+  # 其 setTimeout 被取消，嵌套弹窗永远停在 about:blank（标题 "Web2App"，960x720
+  # 在 +0+0 上层），遮挡主窗链接区与 pad——[1b] 的全部点击/滚轮随之落空（实测复盘）。
+  focus_and_click "$POPUP" 700 100
   xdotool key alt+Home
   assert "popup Alt+Home -> back HOME" wait_title "$POPUP" HOME
   assert "main unaffected by popup accel" wait_title "$MAIN" HOME
+  # 弹窗 F5 抽样（批次 4 接线对弹窗与主窗同构）——必须在 [1b] 主窗断言前做并关闭
+  # 弹窗：无 WM 下 GTK 弹窗占据屏幕左上大片区域，遮挡主窗链接区会使后续
+  # 对主窗的点击落空（实测：goto_away 点到弹窗上，断言级联错位）。
+  focus_and_click "$POPUP" 700 100
+  xdotool key p
+  assert "popup title marker before F5" wait_title "$POPUP" "PAGE_KEY:p"
+  xdotool key F5
+  assert "popup F5 reloads (title resets)" wait_title "$POPUP" HOME
+  send_wm_delete "$POPUP"
+  POPUPGONE=1
+  for i in $(seq 40); do
+    DISPLAY=:99 xdotool getwindowname "$POPUP" >/dev/null 2>&1 || { POPUPGONE=0; break; }
+    sleep 0.25
+  done
+  assert "popup closes via WM_DELETE" test "$POPUPGONE" = 0
 fi
+
+# ---- [1b] 浏览器级按键（批次 4 / C1–C4：刷新、后退/前进、缩放）----
+echo "[1b] browser-level accel keys (reload / back / forward / zoom)"
+# 点击可达性哨兵：弹窗开关一轮后，先证明合成点击仍能到达主窗页面
+# （pad 点击 → PADCLICK）。若无头桌面上方残留任何遮挡窗（如 (d) 段意外
+# 建出的嵌套弹窗），此处立即失败并走 dump，避免下游断言级联误读。
+focus_and_click "$MAIN" 700 100
+assert "clicks reach page after popup close (PADCLICK)" wait_title "$MAIN" PADCLICK
+# 后退/前进断言需要**干净**的相邻历史条目：前序段（(c) iframe 按键）污染过
+# 所在条目的标题，BFCache 恢复快照会把污染标题带回来（实测踩坑）。故先点链接
+# 走一个来回，建立两条无污染的相邻条目：AWAY(新) → HOME(新)。
+assert "navigate to AWAY (for history)" goto_away "$MAIN"
+# away 页的同位链接指回 home.html（夹具 @OTHER@）；与 goto_away 同款首击吞没重试
+for i in 1 2 3; do
+  focus_and_click "$MAIN" 150 50
+  wait_title "$MAIN" HOME && break
+  sleep 0.5
+done
+assert "follow link back HOME (clean entry)" wait_title "$MAIN" HOME
+xdotool key alt+Left
+assert "Alt+Left -> back AWAY" wait_title "$MAIN" AWAY
+xdotool key alt+Right
+assert "Alt+Right -> forward HOME" wait_title "$MAIN" HOME
+# 刷新：page focus → 按 p 改 title → F5/Ctrl+R 重载使 title 归位（证明刷新真实发生）
+focus_and_click "$MAIN" 700 100
+xdotool key p
+assert "title marker before F5 reload" wait_title "$MAIN" "PAGE_KEY:p"
+xdotool key F5
+assert "F5 reloads (title resets)" wait_title "$MAIN" HOME
+xdotool key p
+assert "title marker before Ctrl+R reload" wait_title "$MAIN" "PAGE_KEY:p"
+xdotool key ctrl+r
+assert "Ctrl+R reloads (title resets)" wait_title "$MAIN" HOME
+# 缩放：resize 观测由夹具在 load 后挂接；视口 ≈1100 CSS px，1.1 档 → ≈1000
+xdotool key ctrl+equal
+assert "Ctrl+= zooms in (viewport shrinks)" wait_width "$MAIN" 900 1085
+xdotool key ctrl+minus
+assert "Ctrl+- zooms out (viewport recovers)" wait_width "$MAIN" 1085 1115
+xdotool keydown ctrl; xdotool click 4; xdotool keyup ctrl
+assert "Ctrl+wheel zooms in (viewport shrinks)" wait_width "$MAIN" 900 1085
+xdotool key ctrl+0
+assert "Ctrl+0 resets zoom" wait_width "$MAIN" 1085 1115
 
 # ---- 关闭确定性（真实关闭路径，非强杀）----
 send_wm_delete "$MAIN"

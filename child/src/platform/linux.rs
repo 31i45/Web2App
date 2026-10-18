@@ -20,7 +20,7 @@ use wry::{
 };
 
 use crate::popup::{NewWindowAction, PopupIpc};
-use crate::webview::ChildEvent;
+use crate::webview::{ChildEvent, HostKey};
 
 // ============================================================================
 // 数据目录（XDG Base Directory）
@@ -117,44 +117,136 @@ fn is_home_accel(keyval: gdk::keys::Key, mods: gdk::ModifierType) -> bool {
   keyval == gdk::keys::constants::Home && mods.contains(gdk::ModifierType::MOD1_MASK)
 }
 
-/// 在 WebView 组件上注册 Alt+Home 处理器，命中时执行 `action`。
+/// 宿主层按键动作（批次 4：自回首页扩展为浏览器级按键全集）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeyAction {
+  Home,
+  Key(HostKey),
+}
+
+/// 纯判定：给定 keyval 与修饰位，命中哪条浏览器级快捷键（批次 4 / C1–C4）。
 ///
-/// 与 Windows 侧同名函数对称：`action` 由调用方按窗口形态给出（主窗口回流
-/// `ChildEvent::GoHome` 经 proxy → 主循环 `evaluate_script`；弹窗在本窗 WebView 上直接
-/// 执行 `HOME_GO_SCRIPT`）。仅 [`crate::webview::HOST_ONLY`]（阶段 2 宿主层独占）时返回
-/// `Stop` 吞掉按键；阶段 1 返回 `Proceed` 与页面层并存（对应 Windows 的 `SetHandled`
-/// 门控）。
-pub(crate) fn register_home_accel(webview: &WebView, action: impl Fn() + 'static) {
+/// 判定矩阵（对齐 Chromium / WebView2 默认加速键——Windows 侧这些键由引擎覆盖，
+/// WebKitGTK 不内置、必须宿主接线，见设计文档 §5.1）：
+/// - `Alt+Home` → 回首页（宽松语义：只看 Alt，叠加修饰仍命中，见 [`is_home_accel`]）
+/// - `F5`（无修饰）或 `Ctrl+R` → 刷新（`Ctrl+F5` / `Ctrl+Shift+R` 硬刷新**不支持**：
+///   JS `location.reload(true)` 的强制参数已被规范废弃，给错语义不如不拦截）
+/// - `Alt+←` / `Alt+→` → 后退 / 前进
+/// - `Ctrl`+`=`/`+`/小键盘`+` → 放大；`Ctrl`+`-`/小键盘`-` → 缩小；
+///   `Ctrl`+`0`/小键盘`0` → 复位
+///
+/// 修饰位先剥到 `Ctrl|Alt|Shift` 三态（NumLock 等锁定位不干扰判定）；缩放键忽略
+/// Shift——`+` 在多数键盘布局上本就是 `Shift+=`（Chromium 同样不区分）。
+/// **铁律**：绝不注册编辑类键（Ctrl+C/V/X/A、撤销/重做）——宿主抢占即毁掉页面输入。
+fn classify_accel(keyval: gdk::keys::Key, mods: gdk::ModifierType) -> Option<KeyAction> {
+  use gdk::keys::constants as kc;
+  use gdk::ModifierType as M;
+  if is_home_accel(keyval, mods) {
+    return Some(KeyAction::Home);
+  }
+  let m = mods & (M::CONTROL_MASK | M::MOD1_MASK | M::SHIFT_MASK);
+  let k = keyval.to_lower();
+  let zoom_mods = M::CONTROL_MASK | M::MOD1_MASK;
+  let action = match () {
+    _ if k == kc::F5 && m.is_empty() => HostKey::Reload,
+    _ if k == kc::r && m == M::CONTROL_MASK => HostKey::Reload,
+    _ if k == kc::Left && m == M::MOD1_MASK => HostKey::Back,
+    _ if k == kc::Right && m == M::MOD1_MASK => HostKey::Forward,
+    _ if (k == kc::plus || k == kc::equal || k == kc::KP_Add)
+      && (m & zoom_mods) == M::CONTROL_MASK =>
+    {
+      HostKey::ZoomIn
+    }
+    _ if (k == kc::minus || k == kc::KP_Subtract) && (m & zoom_mods) == M::CONTROL_MASK => {
+      HostKey::ZoomOut
+    }
+    _ if (k == kc::_0 || k == kc::KP_0) && (m & zoom_mods) == M::CONTROL_MASK => {
+      HostKey::ZoomReset
+    }
+    _ => return None,
+  };
+  Some(KeyAction::Key(action))
+}
+
+/// 在 WebView 组件上注册浏览器级按键（含回首页）与 Ctrl+滚轮缩放。
+///
+/// `sink` 由调用方按窗口形态给出（主窗经 proxy 回流主循环；弹窗直接操作本窗
+/// WebView）。时间戳去重见本段头部机制说明（Linux 特有的同事件双路径派发）。
+///
+/// 派发语义（对齐 Chromium 加速键）：动作执行后返回 `Proceed`——WebKitGTK 对这些键
+/// 无默认绑定，页面看得到但阻止不了。两个例外：**回首页**维持既有 `HOST_ONLY` 阶段
+/// 门控；**Ctrl+滚轮**按 Chromium 语义消费滚轮（返回 `Stop`，页面收不到 wheel）。
+fn install_accel_keys(webview: &WebView, sink: impl Fn(KeyAction) + 'static) {
   // 组件级信号：`WebViewExtUnix::webview()` 取 WebKitGTK 原生 `WebKitWebView` widget
-  //（它 `@extends gtk::Widget`，故 `connect_key_press_event` 可用；作用域即该组件）。
+  //（它 `@extends gtk::Widget`，故组件级事件信号可用；作用域即该组件）。
   let widget = webview.webview();
-  let last_time = Cell::new(None::<u32>);
-  widget.connect_key_press_event(move |_, ev| {
-    if !is_home_accel(ev.keyval(), ev.state()) {
+  let sink = Rc::new(sink);
+  let last_key = Cell::new(None::<u32>);
+  widget.connect_key_press_event({
+    let sink = Rc::clone(&sink);
+    move |_, ev| {
+      let Some(action) = classify_accel(ev.keyval(), ev.state()) else {
+        return glib::Propagation::Proceed;
+      };
+      // 时间戳去重：吞掉同一次物理按键的第二份派发（见头部机制说明）。
+      let t = ev.time();
+      if last_key.get() == Some(t) {
+        return glib::Propagation::Proceed;
+      }
+      last_key.set(Some(t));
+      let home = matches!(action, KeyAction::Home);
+      sink(action);
+      if home && crate::webview::HOST_ONLY {
+        glib::Propagation::Stop
+      } else {
+        glib::Propagation::Proceed
+      }
+    }
+  });
+  // Ctrl+滚轮缩放。**为什么不能挂 `scroll-event`**（VM 实测）：GTK 的具体事件信号
+  //（scroll-event 等）是 RUN_FIRST——WebKit 的类处理器先跑并把滚轮消费掉（页面滚动），
+  // 后挂的用户处理器根本收不到。故挂 `connect_event`（"event" 信号在具体事件信号
+  // **之前**发射，见 gtk_widget_event_internal），匹配到 Ctrl+滚轮就返回 `Stop`——
+  // 既执行缩放又阻断 scroll-event 发射（页面收不到 wheel，对齐 Chromium 消费语义）；
+  // 其余事件一律 `Proceed`（普通滚轮照常滚动页面）。平滑/水平滚动不接管。
+  let last_scroll = Cell::new(None::<u32>);
+  widget.connect_event(move |_, ev| {
+    if ev.event_type() != gdk::EventType::Scroll {
       return glib::Propagation::Proceed;
     }
-    // 时间戳去重：吞掉同一次物理按键的第二份派发（见上方机制说明）。
-    let t = ev.time();
-    if last_time.get() == Some(t) {
+    let Some(scroll) = ev.downcast_ref::<gdk::EventScroll>() else {
+      return glib::Propagation::Proceed;
+    };
+    if !scroll.state().contains(gdk::ModifierType::CONTROL_MASK) {
       return glib::Propagation::Proceed;
     }
-    last_time.set(Some(t));
-    action();
-    if crate::webview::HOST_ONLY {
-      glib::Propagation::Stop
-    } else {
-      glib::Propagation::Proceed
+    let zoom = match scroll.direction() {
+      gdk::ScrollDirection::Up => HostKey::ZoomIn,
+      gdk::ScrollDirection::Down => HostKey::ZoomOut,
+      _ => return glib::Propagation::Proceed,
+    };
+    let t = scroll.time();
+    if last_scroll.get() == Some(t) {
+      return glib::Propagation::Stop;
     }
+    last_scroll.set(Some(t));
+    sink(KeyAction::Key(zoom));
+    glib::Propagation::Stop
   });
 }
 
-/// 主窗口：命中 Alt+Home → 回流 `ChildEvent::GoHome`（宿主层按键机制入口，§1 接缝项）。
+/// 主窗口：命中浏览器级按键 → 回流主循环执行（宿主层按键机制入口，§1 接缝项）。
 ///
-/// 动作经 proxy 回流主循环再 `evaluate_script`，与 Windows 侧同构、统一收口——不在
-/// 按键回调内同步求值。
+/// 回首页沿用 `ChildEvent::GoHome`；其余动作经 `ChildEvent::HostKey` 回流——主循环
+/// 持有 wry `WebView` 与宿主自持的当前缩放档（wry `zoom` 只设绝对值，见
+/// `webview.rs` 的 `zoom_level`）。动作经 proxy 回流与 Windows 侧同构、统一收口。
 pub(crate) fn install_keys(webview: &WebView, proxy: EventLoopProxy<ChildEvent>) {
-  register_home_accel(webview, move || {
-    let _ = proxy.send_event(ChildEvent::GoHome);
+  install_accel_keys(webview, move |action| {
+    let event = match action {
+      KeyAction::Home => ChildEvent::GoHome,
+      KeyAction::Key(key) => ChildEvent::HostKey(key),
+    };
+    let _ = proxy.send_event(event);
   });
 }
 
@@ -377,7 +469,6 @@ pub(crate) fn create_popup(
     c.set(v + 1);
     v
   });
-
   let window = gtk::Window::new(gtk::WindowType::Toplevel);
   // 初始标题：空白窗用品牌名（避免窗口标题显示 "about:blank"），其余用 host
   //（与 Windows 侧同规则）。
@@ -459,16 +550,46 @@ pub(crate) fn create_popup(
   // 交给 WebKit 的原生视图（GObject 引用计数，clone 后再把 wry 侧 WebView 存入注册表）。
   let raw = webview.webview();
 
-  // 宿主层 Alt+Home（弹窗路径，与 Windows 侧 `register_home_accel` + `WM_APP_HOME` 对等）：
-  // 命中即在本窗 WebView 上执行页面层的决策单点 `__w2aHome()`。GTK 侧无需像 Windows 那样
-  // 经窗口消息延后派发——`evaluate_script` 走 WebKit 异步 `run_javascript`（不阻塞、不在
+  // 宿主层按键（弹窗路径，与主窗同一判定）：回首页在本窗 WebView 上执行页面层决策
+  // 单点 `__w2aHome()`（与 Windows 侧 `register_home_accel` + `WM_APP_HOME` 对等）；
+  // 其余浏览器级按键（批次 4）直接操作本窗 WebView。GTK 侧无需像 Windows 那样经窗口
+  // 消息延后派发——`evaluate_script` 走 WebKit 异步 `run_javascript`（不阻塞、不在
   // GTK 信号回调内重入），故直接按 id 从注册表取本窗 WebView 执行。回调在按键时触发，
   // 此时本弹窗项已在 `POPUPS` 中（下方插入），取用时仅短借 `POPUPS`（`evaluate_script`
-  // 不同步回改注册表，无 `RefCell` 重入）。
-  register_home_accel(&webview, move || {
+  // 不同步回改注册表，无 `RefCell` 重入）。缩放当前档按弹窗自持（wry `zoom` 只设
+  // 绝对值）。
+  let zoom_level = Rc::new(Cell::new(1.0f64));
+  install_accel_keys(&webview, move |action| {
     POPUPS.with(|m| {
       if let Some(p) = m.borrow().get(&id) {
-        let _ = p.webview.evaluate_script(crate::webview::HOME_GO_SCRIPT);
+        match action {
+          KeyAction::Home => {
+            let _ = p.webview.evaluate_script(crate::webview::HOME_GO_SCRIPT);
+          }
+          KeyAction::Key(key) => match key {
+            HostKey::Reload => {
+              let _ = p.webview.evaluate_script("location.reload()");
+            }
+            HostKey::Back => {
+              let _ = p.webview.evaluate_script("history.back()");
+            }
+            HostKey::Forward => {
+              let _ = p.webview.evaluate_script("history.forward()");
+            }
+            HostKey::ZoomIn | HostKey::ZoomOut => {
+              let z = crate::webview::zoom_step(
+                zoom_level.get(),
+                if key == HostKey::ZoomIn { 1 } else { -1 },
+              );
+              zoom_level.set(z);
+              let _ = p.webview.zoom(z);
+            }
+            HostKey::ZoomReset => {
+              zoom_level.set(1.0);
+              let _ = p.webview.zoom(1.0);
+            }
+          },
+        }
       }
     });
   });
@@ -569,6 +690,56 @@ mod tests {
     let s = data_dir("apps").to_string_lossy().replace('\\', "/");
     assert!(s.ends_with("/Web2App/apps"), "got: {s}");
     assert!(data_dir("apps").is_absolute());
+  }
+
+  /// 批次 4：浏览器级按键判定矩阵（对齐 Chromium/WebView2 默认加速键语义）。
+  #[test]
+  fn classify_accel_browser_keys_matrix() {
+    use gdk::keys::constants as kc;
+    use gdk::ModifierType as M;
+    let none = M::empty();
+    let ctrl = M::CONTROL_MASK;
+    let alt = M::MOD1_MASK;
+    let shift = M::SHIFT_MASK;
+    let key = |k, m| classify_accel(k, m);
+
+    // 刷新：F5（无修饰）/ Ctrl+R；硬刷新组合不拦截（不支持硬刷新，诚实落空）
+    assert_eq!(key(kc::F5, none), Some(KeyAction::Key(HostKey::Reload)));
+    assert_eq!(key(kc::r, ctrl), Some(KeyAction::Key(HostKey::Reload)));
+    assert_eq!(key(kc::R, ctrl), Some(KeyAction::Key(HostKey::Reload))); // to_lower 归一
+    assert_eq!(key(kc::F5, ctrl), None);
+    assert_eq!(key(kc::r, ctrl | shift), None);
+    assert_eq!(key(kc::F5, shift), None);
+
+    // 后退 / 前进：Alt+← / Alt+→（精确 Alt；叠加 Ctrl/Shift 落空）
+    assert_eq!(key(kc::Left, alt), Some(KeyAction::Key(HostKey::Back)));
+    assert_eq!(key(kc::Right, alt), Some(KeyAction::Key(HostKey::Forward)));
+    assert_eq!(key(kc::Left, none), None);
+    assert_eq!(key(kc::Left, alt | shift), None);
+    assert_eq!(key(kc::Left, ctrl), None);
+
+    // 缩放：Ctrl+= / Ctrl+(Shift)+ / Ctrl+KP_Add 放大（忽略 Shift 位）
+    assert_eq!(key(kc::equal, ctrl), Some(KeyAction::Key(HostKey::ZoomIn)));
+    assert_eq!(key(kc::plus, ctrl), Some(KeyAction::Key(HostKey::ZoomIn)));
+    assert_eq!(key(kc::plus, ctrl | shift), Some(KeyAction::Key(HostKey::ZoomIn)));
+    assert_eq!(key(kc::KP_Add, ctrl), Some(KeyAction::Key(HostKey::ZoomIn)));
+    assert_eq!(key(kc::minus, ctrl), Some(KeyAction::Key(HostKey::ZoomOut)));
+    assert_eq!(key(kc::KP_Subtract, ctrl), Some(KeyAction::Key(HostKey::ZoomOut)));
+    assert_eq!(key(kc::_0, ctrl), Some(KeyAction::Key(HostKey::ZoomReset)));
+    assert_eq!(key(kc::KP_0, ctrl), Some(KeyAction::Key(HostKey::ZoomReset)));
+    // 缩放键无 Ctrl 落空；带 Alt 落空
+    assert_eq!(key(kc::equal, none), None);
+    assert_eq!(key(kc::equal, ctrl | alt), None);
+
+    // 编辑类键铁律：Ctrl+C/V/X/A 一律不拦截
+    assert_eq!(key(kc::c, ctrl), None);
+    assert_eq!(key(kc::v, ctrl), None);
+    assert_eq!(key(kc::x, ctrl), None);
+    assert_eq!(key(kc::a, ctrl), None);
+
+    // 回首页仍由宽松判定兜住（含叠加修饰），并经 classify 归到 Home
+    assert_eq!(key(kc::Home, alt), Some(KeyAction::Home));
+    assert_eq!(key(kc::Home, alt | shift), Some(KeyAction::Home));
   }
 
   /// 与 Windows 侧 `is_home_accel_predicate_matrix` 同构：Alt+Home 判定矩阵。

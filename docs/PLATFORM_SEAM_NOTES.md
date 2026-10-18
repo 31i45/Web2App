@@ -80,7 +80,7 @@
 | `fatal` | `MessageBoxW`（GUI 子系统下 stderr 不可见） | `eprintln!` + `exit(1)`（UNIX 惯例，stderr 可见） | 可选 GTK dialog |
 | `quit_watchdog` | 看门狗线程 300ms 后 `exit(0)` | **no-op**（GTK 无「WebView2 嵌套 COM 消息泵吞掉 WM_QUIT」的结构性问题；`ControlFlow::Exit` 即确定退出） | T-1-1：实测若出现残留再补 |
 | `install_close_watchdog` | WNDPROC 哨兵（替换窗口过程捕获 `WM_CLOSE`） | **no-op**（纯 Win32 机制，GTK 无对应物） | 同上 |
-| `install_keys` | `ICoreWebView2AcceleratorKeyPressed`（按键送达内容层**之前**回调，覆盖跨源 iframe 焦点边界） | **已落（T-1-2）**：组件级 `key-press-event`，见 §3.1 | 无（V-3 三候选实测后落定） |
+| `install_keys` | `ICoreWebView2AcceleratorKeyPressed`（按键送达内容层**之前**回调，覆盖跨源 iframe 焦点边界） | **已落（T-1-2 + 批次 4）**：组件级 `key-press-event`；批次 4 扩为浏览器级按键全集（F5/Ctrl+R、Alt+←/→、Ctrl+±/0、Ctrl+滚轮），见 §3.1 / §3.9 | 无（V-3 三候选实测后落定） |
 | `shell_open` | `ShellExecuteW`（非阻塞） | `xdg-open`（`spawn`，非阻塞，语义对等） | 无（可选 `gio open` 细化） |
 | `open_external_if_http` | 仅 http(s) 外发 | 同（共享语义） | 无 |
 | `create_popup` | 裸 Win32 顶层窗 + **同 Environment** 的 WebView2（`NewWindowResponse::Create`） | **已落（T-1-1）**：GTK 顶层窗 + `NewWindowResponse::Create { webview }`（载荷 `webkit2gtk::WebView`，`build_gtk` 挂自建容器） | 无 |
@@ -324,6 +324,40 @@ rejected promise 的 no-op」，并把 `document.fullscreenEnabled` / `webkitFul
 > `CHILD_TEMPLATE`。只跑 `cargo build --workspace` 时 cargo 不保证 child 先于 master 的
 > build script 完成 → 产物可能内嵌**陈旧 child**。做产物级验证必须
 > `cargo build -p child && cargo build -p master`（`build.ps1` 即此序）。
+
+### 3.9 批次 4（C1–C4）：Linux 浏览器级按键补齐
+
+**结论**：设计文档 §5.1 矩阵中 Linux 列的三处「必须接线」已落地——`F5` / `Ctrl+R`
+（刷新）、`Alt+←` / `Alt+→`（后退 / 前进）、`Ctrl+±/0` 与 **Ctrl+滚轮**（缩放），
+机制复用 §3.1 的组件级 `key-press-event`（Ctrl+滚轮挂 `event` 信号，见下）。
+
+**Ctrl+滚轮为什么挂 `event` 而非 `scroll-event`**（VM 实测）：GTK 的具体事件信号
+（`scroll-event` 等）是 RUN_FIRST——WebKit 的类处理器先跑并把滚轮消费掉（页面滚
+动），后挂的用户处理器**根本收不到**。`event` 信号在具体事件信号**之前**发射
+（`gtk_widget_event_internal`），故挂 `connect_event` 匹配 `EventType::Scroll` +
+Ctrl 后返回 `Stop`——既执行缩放又阻断 `scroll-event` 发射（页面收不到 wheel，
+对齐 Chromium 的消费语义）；其余事件一律 `Proceed`（普通滚轮照常滚动页面）。
+
+**判定与执行分层**：`classify_accel`（纯判定，Linux 侧单测矩阵覆盖，含「编辑类键
+铁律」反例）→ `KeyAction` → 主窗经 `ChildEvent::HostKey` 回流主循环执行，弹窗直接
+操作本窗 WebView（同 §3.1 的弹窗路径）。刷新 / 后退 / 前进经 JS（`location.reload()`
+/ `history.back()` / `history.forward()`，主帧执行 = 浏览器语义）；缩放走 wry 跨平台
+`WebView::zoom`（只设绝对值 → 当前档由宿主按窗口自持，阶梯对齐 Chromium：
+0.25…1.0…5.0，见 `webview.rs::ZOOM_STOPS`）。
+
+**两个诚实的边界**：
+1. **硬刷新不支持**：`Ctrl+F5` / `Ctrl+Shift+R` 不拦截——JS `location.reload(true)`
+   的强制参数已被规范废弃，给错语义不如不拦截（判定矩阵中对 Shift 组合精确落空）。
+2. **`with_hotkeys_zoom` 在 Linux 是 no-op**（wry 0.57 平台事实）：缩放热键完全由本
+   接线提供；`Ctrl+滚轮` 按 Chromium 语义返回 `Stop`（消费滚轮，页面收不到 wheel）。
+
+**派发语义**：按键执行后返回 `Proceed`（WebKitGTK 无默认绑定，页面看得到但阻止不
+了，对齐 Chromium 加速键）；回首页维持既有 `HOST_ONLY` 门控；同事件双路径派发沿用
+§3.1 的时间戳去重（滚轮同法）。
+
+**e2e 门禁**：`e2e.sh` [1b] 段——后退/前进（标题随导航变化）、F5/Ctrl+R（改标题后
+重载归位）、Ctrl+=/Ctrl+-/Ctrl+0/Ctrl+滚轮（夹具 `resize` 上报 `innerWidth`，按区间
+断言视口缩放），弹窗 F5 抽样一条。
 
 ---
 
