@@ -157,7 +157,7 @@ app 数据目录存在且含 localStorage/cookies 文件，且 `$XDG_DATA_HOME/w
 - **架构映射**：`dpkg_arch` 仅映射本机原生目标（x86_64→amd64、aarch64→arm64），其余报错
   ——不做交叉打包（§10）。
 
-### 3.4 T-1-5 落定：audit.ps1 ELF 判据（结构性不可繁殖跨平台）
+### 3.4 T-1-5 落定：audit.ps1 ELF 判据（依赖边界审计跨平台）
 
 **合法 ELF 映像判据**（与 PE 判据同构）：`\x7fELF` 魔数 + 节头表指针（`e_shoff` QWORD@+0x28）
 指向文件内完整节头表（`e_shnum × e_shentsize` 全部落界）。裸魔数会偶然出现在机器码/数据里
@@ -277,3 +277,25 @@ host 交叉编译；build-dependency **不进产物** → 不触轻量红线。�
   更新（§12 DoD）
 - CI：release job 仍只依赖 Windows `verify`——Linux **不产出发布 `.deb`**（§10「不做跨平台
   打包」；verify-linux 的 G-1 仅验证能力与行为，发布产物属阶段 2 决策）
+
+---
+
+## 8. HOST_ONLY 翻转条件（回首页按键的两层并存收口）
+
+`HOST_ONLY`（`child/src/webview.rs:29`，当前 `false` = 页面层 `keydown` 与宿主层
+`AcceleratorKeyPressed` 并存）是回首页按键的阶段开关，**不是** 配置项。
+
+**翻转条件（进入阶段 2 的唯一门径）**：宿主层按键路径在 Windows + Linux 双平台 e2e
+中验证稳定（按键矩阵全绿、跨源 iframe 焦点兜底实测有效）后，才允许置 `true` 并删除
+页面层 `keydown` 注册。
+
+**此前保持双层并存**：两层同达时由注入脚本内 200 ms 时间戳去重，宁可偶发去重命中、
+不可单层失守（页面层在跨源 iframe 焦点下收不到按键；宿主层是各平台新路径，未达双
+平台稳定验证前不作唯一依赖）。
+
+---
+
+## 9. 架构决策记录约定
+
+- 今后重大架构决策以 ADR 形式记录于 `docs/adr/NNNN-标题.md`（序号递增，单个决策一个文件）。
+- 本约定之前的设计文档（`docs/CROSS_PLATFORM_DESIGN.md`、本文件）视为约定前史，原地保留、不回拆。

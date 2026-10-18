@@ -43,7 +43,7 @@ Web2App 是一个 **Web → 桌面应用打包器**：把常用网页（管理�
 
 产物运行时复用系统自带的浏览器内核（Windows 为 WebView2，Linux 为 WebKitGTK），页面里的 JS、登录态、接口调用与浏览器完全一致；**是否可离线使用取决于网站自身是否具备缓存/Service Worker，壳不缓存任何业务资源**。
 
-设计受 [Pake](https://github.com/tw93/Pake) 与小暖科技 SiteNative 启发，但架构选择不同：不依赖 Node/CLI 工具链，**一个 GUI 打包器单文件离线产出**，且「子应用结构性不可繁殖」是编译期保证而非约定（详见[架构](#-架构)）。
+设计受 [Pake](https://github.com/tw93/Pake) 与小暖科技 SiteNative 启发，但架构选择不同：不依赖 Node/CLI 工具链，**一个 GUI 打包器单文件离线产出**（详见[架构](#-架构)）。
 
 ## 适合 / 不适合
 
@@ -107,14 +107,13 @@ web2app --pack <url> [--icon <icon.png>] [--out <产物路径>]
 
 ## 🧠 架构
 
-三 crate workspace 同时满足两条硬约束：**用户产物单文件、极致轻量**；**子应用结构性不可繁殖**。
+三 crate workspace 服务于一条硬约束：**用户产物单文件、极致轻量**。
 
 ```
 .
 ├── tail-core/            # 纯逻辑层（零 OS 依赖，可任意宿主单测）
-│   └── src/lib.rs        #   AppConfig / read_tail / encode_tail / strip_tail /
-│                         #   decode_png / resize_box / sanitize_host / host_of /
-│                         #   url_fingerprint；手写 JSON 转义 · base64 · CRC32
+│   └── src/              #   lib.rs 纯 re-export；tail.rs 尾部协议 + JSON 转义 · CRC32；
+│                         #   text.rs JS 字面量 · base64；image.rs PNG 解码/缩放；url.rs URL 工具
 ├── child/                # 子应用运行时（用户分发的精简产物，约 700 KiB）
 │   ├── build.rs          #   winres 将 w2a.ico 编译进 .rsrc（仅 Windows 目标生效）
 │   └── src/
@@ -136,7 +135,8 @@ web2app --pack <url> [--icon <icon.png>] [--out <产物路径>]
 │       └── platform/     #   数据目录 / 路径规范化 / 打包平台项 / 关闭兜底 / 致命错误
 ├── assets/               # w2a.ico · logo_256.png · 双平台截图
 ├── docs/                 # 跨平台设计文档与平台 seam 笔记
-├── audit.ps1             # 结构性不可繁殖审计：标记扫描 / PE·ELF 映像计数 / cargo tree 边界
+├── GLOSSARY.md           # 术语表（文档与代码注释的统一口径）
+├── audit.ps1             # 依赖边界审计：标记扫描 / PE·ELF 映像计数 / cargo tree 边界
 ├── build.ps1 / build.sh  # 一键构建（child → 测试 → clippy → master → 装配）
 └── e2e.ps1 / e2e.sh      # 端到端门禁（Windows 30 项 / Linux 37 项断言）
 ```
@@ -271,7 +271,7 @@ Linux 不选择 AppImage：依赖 FUSE，而部分发行版默认禁用 FUSE。�
 
 ```powershell
 .\build.ps1                                              # child → 测试 → clippy → master → 装配 dist\
-.\audit.ps1                                              # 结构性不可繁殖审计
+.\audit.ps1                                              # 依赖边界审计
 .\e2e.ps1                                                # 端到端门禁（30 项断言）
 cargo test --workspace                                   # 84 个单元测试
 cargo clippy --workspace --all-targets -- -D warnings    # 零告警

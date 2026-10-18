@@ -2,5 +2,8 @@
 /.temp/
 /.trae/
 
+# 本地 agent 技能库（第三方内容，仅本机使用）
+/.agents/
+
 # dist 为本地构建产物，不入库；发布物一律由 CI 构建并发布到 GitHub Releases
 /dist/
