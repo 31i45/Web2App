@@ -121,6 +121,34 @@ jobs:
         run: |
           dbus-run-session -- bash -c 'CHILD=target/release/child MASTER=target/release/web2app bash e2e.sh'
 
+  # 违禁词词级扫描（.skills/03 A3）：对外文档不得出现 INSTANCE.md 清单中的内部术语。
+  # 清单从 .skills/INSTANCE.md 标记块读取——改清单改 INSTANCE.md，不改本文件。
+  # .skills/ 未提交入库时清单为空 → 本 job 显式失败（强制实例文件随代码入库）。
+  banned-words:
+    name: banned-words scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan public docs (word-level)
+        run: |
+          set -euo pipefail
+          list=$(sed -n '/CI-BANNED-WORDS-BEGIN/,/CI-BANNED-WORDS-END/p' .skills/INSTANCE.md \
+                 | grep -v 'CI-BANNED-WORDS' | grep -v '^[[:space:]]*$' || true)
+          if [ -z "$list" ]; then
+            echo "::error::banned-word list is empty — check .skills/INSTANCE.md markers (CI-BANNED-WORDS-BEGIN/END)"
+            exit 1
+          fi
+          fail=0
+          while IFS= read -r word; do
+            [ -n "$word" ] || continue
+            if grep -n -- "$word" README.md README.zh-CN.md; then
+              echo "::error::banned word in public docs: $word"
+              fail=1
+            fi
+          done <<< "$list"
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "banned-words scan: clean"
+
   # 发布（仅 v* 标签）：Windows 单目标
   build:
     name: build (windows)

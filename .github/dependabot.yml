@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # 依赖版本更新 PR（漏洞告警另需仓库 Settings → Security → Dependabot 手工开启）
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+  # CI 自身动作的版本维护（checkout/rust-cache/upload-artifact 等）
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

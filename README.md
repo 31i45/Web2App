@@ -147,7 +147,7 @@ A three-crate workspace serving one hard constraint: **user products are single-
 
 ### Why two binaries
 
-- **child**: the minimal runtime — the product users receive. It contains no packager code: **the tail-writing capability `tail_write` is physically isolated inside the master crate; child's dependency graph contains no tail-writing code, so there is no way to gain "re-pack" capability by patching it or deleting CLI arguments**. This is a compile-time structural guarantee, not something left to the release optimizer.
+- **child**: the minimal runtime — the product users receive. It contains no packager code: **the tail-writing capability `tail_write` is physically isolated inside the master crate; child's dependency graph contains no tail-writing code**. This is a compile-time structural guarantee, not something left to the release optimizer.
 - **master (web2app)**: the packager, embedding the child template via `include_bytes!(env!("CHILD_BIN_PATH"))` at compile time. Fill the form → pack → every output byte comes from child, never from master's own binary (byte-level identity is asserted in e2e).
 
 The two share only the tail protocol and PNG/URL utilities via `tail-core`. `audit.ps1` mechanically guards this boundary in CI: sensitive string-marker scan + PE/ELF image counting + `cargo tree` dependency assertions.

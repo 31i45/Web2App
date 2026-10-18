@@ -147,7 +147,7 @@ web2app --pack <url> [--icon <icon.png>] [--out <产物路径>]
 
 ### 为什么是两个二进制
 
-- **child**：精简运行时，即用户分发的产物。它不含任何打包器代码——**写尾能力 `tail_write` 物理隔离在 master crate 内，child 的依赖图里不存在写尾代码，无法通过补丁、删命令行参数等方式获得「再打包」能力**。这是编译期结构性保证，不依赖 release 优化器剔除。
+- **child**：精简运行时，即用户分发的产物。它不含任何打包器代码——**写尾能力 `tail_write` 物理隔离在 master crate 内，child 的依赖图里不存在写尾代码**。这是编译期结构性保证，不依赖 release 优化器剔除。
 - **master（web2app）**：打包器，编译期 `include_bytes!(env!("CHILD_BIN_PATH"))` 内嵌 child 模板。填表 → 打包 → 输出的每一个字节都源自 child，与 master 自身二进制无关（e2e 中有字节级一致性断言）。
 
 两者仅经 `tail-core` 共享尾部协议、PNG/URL 工具。`audit.ps1` 在 CI 中机械守护该边界：敏感字符串标记扫描 + PE/ELF 映像计数 + `cargo tree` 依赖断言。
