@@ -209,7 +209,7 @@ wry 默认关闭了一批 WebView2/WebKitGTK 原生特性，产物按「桌面�
 | 导航与缩放 | `with_hotkeys_zoom` 缩放、`with_back_forward_navigation_gestures` 触摸板横扫；Alt+←/→、鼠标侧键等 WebView2 浏览器快捷键保持默认，历史栈完整可连续回退 |
 | 回首页 | **Alt+Home** 双层送达：页面层 `keydown`（含判定、BFCache 回跳、在途守卫）+ 宿主层 `AcceleratorKeyPressed`（`webview2-com` 直连，焦点在跨源 iframe 内时兜底），200 ms 时间戳去重；历史中命中首页条目走 Navigation API `traverseTo`（BFCache 瞬时生效），否则整页导航；主窗口与弹窗共用同一首页 |
 | 剪贴板 | `with_clipboard(true)`（默认关闭）。**已知边界**：wry 权限回调不携带请求 origin，只能全局放行或全局关闭，为不牺牲「粘贴」类交互选择全局放行 |
-| 下载 | 保持 WebView2 原生下载面板与落点（注册处理器反而会关掉原生面板），仅在页面内补一条完成/失败轻提示 |
+| 下载 | 双平台行为一致：静默落盘系统默认下载目录 + 页面内一条完成/失败轻提示。wry 0.57 默认即注册 allow-all 的「开始下载」处理器，该处理器会置 `Handled = TRUE`——按 WebView2 语义这会**隐藏**原生下载对话框；其公共 API 无法清空该处理器，故原生面板不可用 |
 | 标题同步 | `document.title` 回流主循环：主窗口保留品牌标题，弹窗跟随文档标题 |
 | `window.close` 守卫 | 页面对顶层窗口的 `window.close()` 降级为无操作（对齐浏览器对「非脚本打开的顶层窗」语义）；弹窗的 `window.close()` 正常关窗 |
 | 主题跟随 | 页面 `prefers-color-scheme` 与窗口标题栏均跟随系统深浅色 |

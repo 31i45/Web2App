@@ -185,6 +185,8 @@ Window  : Minimize / Zoom
 
 **另外两项须实测**：Linux 侧 `WebContext.data_directory` 是否真隔离（否则跨应用共享 cookie/localStorage，破坏 INV-4，见 V-6）；`home_hotkey_script` 的 Navigation API `traverseTo`/BFCache 路径在旧 WebKitGTK 缺失时能否优雅回退（V-7）。
 
+**补充披露（下载）**：下载功能双平台可用，但 **WebView2 原生下载面板不可用**——wry 0.57 的默认 attrs 即注册 allow-all 的「开始下载」处理器并置 `Handled = TRUE`（WebView2 语义 = 隐藏默认下载对话框），公共 API 无法清空该处理器。两平台统一为「静默落盘系统默认下载目录 + 页面内完成/失败轻提示」。事实与实测见 `docs/PLATFORM_SEAM_NOTES.md` §3.6。
+
 ---
 
 ## 6. 打包

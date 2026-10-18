@@ -155,8 +155,13 @@ pub fn build_window(
 ///   「关闭守卫」把页面 `window.close()` 降级为无操作（见模块头说明）；
 /// - 新窗口请求路由（站内就地导航 / 跨站交系统 / 建独立窗口 / 伪协议忽略），见 `popup`；
 /// - 文档标题同步（回流主循环 `set_title`）；
-/// - 下载完成反馈：**不**注册「开始下载」处理器——一旦注册 wry 会 `SetHandled(true)`
-///   关掉 WebView2 自带的下载面板。保持默认（面板 + 落点）后才补一条完成提示。
+/// - 下载反馈：注册「下载完成」处理器，页面内补一条完成/失败轻提示。**注意 wry 0.57
+///   的默认 attrs 已内置 allow-all 的「开始下载」处理器**（`WebViewAttributes::default`），
+///   且公共 API 无法把它清回 `None`——故该层恒被注册：Windows 侧 wry 由它调
+///   `SetHandled(true)`（WebView2 语义 = **隐藏**默认下载对话框），Linux 侧 wry 自行把
+///   目的地设为 `~/Downloads` 并按 `(n)` 去重。两平台因此一致：**静默落盘系统默认下载
+///   目录 + 页面内轻提示**，不出现 WebView2 原生下载面板。要恢复原生面板须清空该处理器，
+///   wry 0.57 无此 API（改动代价与收益不成比例，不做）。详见 `docs/PLATFORM_SEAM_NOTES.md` §3.6。
 ///
 /// devtools 仅 debug 构建启用（release 零开销）。
 /// 失败原因典型为系统 WebView 运行时缺失（Windows WebView2），返回 Err 交由调用方呈现。

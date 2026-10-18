@@ -213,6 +213,32 @@ WebKitGTK——**不内嵌 webview**）；13MB 是 debug master 内嵌 89MB debu
 被 xz 后仍残留的体积。`build.sh`（build.ps1 的 Linux 镜像）锁定 release 口径：
 child → test → clippy → master → `dist/web2app`。
 
+### 3.6 下载落盘：行为由 wry 默认处理器决定（VM 实测 + 源码核对）
+
+**结论**：主窗口下载**双平台均正常且行为一致** = 静默落盘**系统默认下载目录** + 页面内
+完成/失败轻提示；不出现 WebView2 原生下载面板。
+
+**机制（wry 0.57 源码，三处已核对）**：
+1. `WebViewAttributes::default()` 即置 `download_started_handler: Some(|_, _| true)`
+   （`wry/src/lib.rs`）——**默认就有一个 allow-all 的「开始下载」处理器**。
+2. Windows：只要 `started.is_some() || completed.is_some()` 就注册 `add_DownloadStarting`
+   （`wry/src/webview2/mod.rs`）；回调返回 `true` → `SetHandled(true)` + `SetResultFilePath`。
+3. Linux：同条件注册（`wry/src/webkitgtk/mod.rs`）；回调内把目的地设为
+   `dirs::download_dir()`（`~/Downloads`）并按 ` (n)` 去重后 `set_destination`
+   （`wry/src/webkitgtk/web_context.rs`）。
+
+两分支的公共 API 都**只能**设置新处理器、**无法**把该字段清回 `None`——故「不注册
+开始下载处理器」在 wry 0.57 下不可达。
+
+**事实修正（WebView2 官方语义）**：`Handled = TRUE` **隐藏**默认下载对话框；`FALSE`（默认值）
+才显示。故 wry 的默认处理器意味着 **Windows 原生下载面板被抑制**——`README` 曾表述的
+「保持原生下载面板」与实际不符，本轮已按真实行为改写。要恢复面板须清空该处理器，
+wry 0.57 无此 API（代价 > 收益，不做）。
+
+**VM 实测（Zorin，Xvfb + xdotool + 本地 `http.server`）**：`http://` 链接与 `data:` URL
+两种下载均落盘 `~/Downloads`（wry 对 `data:` 有文件名归一化分支），进程全程存活，
+未观察到挂起。
+
 ---
 
 ## 4. 平台无关层（不得出现平台判断）
