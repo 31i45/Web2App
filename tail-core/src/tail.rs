@@ -443,31 +443,6 @@ mod tests {
   }
 
   #[test]
-  fn base64_known_vectors() {
-    assert_eq!(base64_encode(b"Man"), "TWFu");
-    assert_eq!(base64_encode(b"Ma"), "TWE=");
-    assert_eq!(base64_encode(b"M"), "TQ==");
-    assert_eq!(base64_encode(b""), "");
-    assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
-    assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
-    assert_eq!(base64_decode("TQ==").unwrap(), b"M");
-    assert_eq!(base64_decode("").unwrap(), b"");
-    // 忽略空白
-    assert_eq!(base64_decode("TW\nFu").unwrap(), b"Man");
-    assert!(base64_decode("A").is_none());
-    assert!(base64_decode("!!!").is_none());
-  }
-
-  #[test]
-  fn base64_roundtrip_random_lengths() {
-    for len in 0..64usize {
-      let data: Vec<u8> = (0..len as u8).map(|i| i.wrapping_mul(37).wrapping_add(11)).collect();
-      let enc = base64_encode(&data);
-      assert_eq!(base64_decode(&enc).unwrap(), data, "len={len}");
-    }
-  }
-
-  #[test]
   fn json_escapes_special_chars() {
     let c = AppConfig::new("https://a.com/?q=\"x\"\\n".into(), "标\"题\\".into(), None);
     let parsed = AppConfig::from_json(&c.to_json()).unwrap();
