@@ -1,4 +1,4 @@
-# audit.ps1 — 结构性不可繁殖静态审计（纯静态，不启动 GUI；与 e2e.ps1 分工）
+# audit.ps1 — 结构隔离静态审计（纯静态，不启动 GUI；与 e2e.ps1 分工）
 #
 # 目标：把「child 产物不含打包能力」从「靠 release 优化器/运气剔除」升级为
 #       「编译期结构性 + CI 机械可守」。
@@ -96,7 +96,7 @@ function Get-ElfImageCount([byte[]]$bytes) {
   return $count
 }
 
-Write-Host "== Web2App 结构性不可繁殖审计 ==" -ForegroundColor Cyan
+Write-Host "== Web2App 结构隔离审计 ==" -ForegroundColor Cyan
 $childBytes = [System.IO.File]::ReadAllBytes($ChildPath)
 $masterBytes = [System.IO.File]::ReadAllBytes($MasterPath)
 $childText = Read-Latin1 $ChildPath

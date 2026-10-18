@@ -370,6 +370,9 @@ thread_local! {
 /// （WebView2 契约：目标 WebView 必须与发起方同环境，否则 `SetNewWindow` 失败），
 /// `size` / `position` 是页面请求的窗口特征。`home` 是应用起始页，注入给弹窗的
 /// Alt+Home 回首页脚本（弹窗与主窗口共用同一首页）。
+///
+/// 行数说明：超 50 行豁免——建窗 + 挂 WebView 的 builder 链为事务整体，
+/// 拆分反而破坏「任一步失败统一降级」的原子性。
 pub(crate) fn create_popup(
   url: &str,
   features: NewWindowFeatures,

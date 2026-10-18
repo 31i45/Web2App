@@ -1,13 +1,18 @@
 //! master/src/builder.rs — 打包核心引擎。
 //!
 //! 唯一职责：`复制 child 模板 → 注入用户图标（UpdateResource）→ 追加尾部配置 → 可选签名`。
-//! child 模板编译期内嵌（CHILD_TEMPLATE），无 self_exe 读取，无自繁殖能力——
-//! child crate 不含打包器代码，产物（child + 尾部）也无法调用 pack。
+//! child 模板编译期内嵌（CHILD_TEMPLATE），无 self_exe 读取——
+//! 打包器代码仅在 master crate（child 的依赖图中不含），产物（child + 尾部）也无法调用 pack。
 
 use tail_core::{self, AppConfig};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 临时文件进程内序号：同进程可能连续/并发打包（GUI 事件循环内多次触发），
+/// tmp 名必须互不相同，否则并发时互相覆盖或误删对方的临时文件。
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 打包结果。
 #[derive(Debug)]
@@ -60,7 +65,10 @@ pub fn pack(out_path: &Path, url: &str, icon_png: Option<Vec<u8>>) -> io::Result
   validate_url(url).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
   let title = tail_core::default_title(url);
-  let tmp_out = out_path.with_extension("tmp.pack");
+  // tmp 名带 pid + 进程内序号：仅 pid 不足以区分同进程内的并发打包，
+  // 序号保证同进程内每次调用拿到唯一临时文件。
+  let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+  let tmp_out = out_path.with_extension(format!("{}.{}.tmp.pack", std::process::id(), seq));
 
   // 组装与落盘；任一步失败都保证临时文件被清理（不留残渣）
   let built = (|| -> io::Result<u64> {
@@ -162,8 +170,9 @@ mod tests {
     assert_eq!(cfg.title, "example.com");
     assert_eq!(result.size, raw.len() as u64);
 
-    // 原子落盘：临时文件已清理
-    assert!(!dir.join("product.tmp.pack").exists());
+    // 原子落盘：临时文件已清理（tmp 名含 pid+序号，扫目录断言无任何残留）
+    let residue = tmp_residue(&dir);
+    assert!(residue.is_empty(), "tmp residue leaked: {residue:?}");
   }
 
   #[test]
@@ -223,8 +232,18 @@ mod tests {
 
     let result = pack(&dir.join("product.bin"), "https://example.com", None);
     assert!(result.is_err());
-    // 关键断言：不留 tmp 残渣。tmp 名 = out.with_extension("tmp.pack")，
-    // 即 product.tmp.pack（with_extension 替换 .bin 而非追加）。
-    assert!(!dir.join("product.tmp.pack").exists(), "tmp residue leaked");
+    // 关键断言：不留 tmp 残渣。tmp 名 = with_extension("{pid}.{seq}.tmp.pack")，
+    // 固定名断言不再适用 → 扫描目录确认无任何 *.tmp.pack* 残留。
+    let residue = tmp_residue(&dir);
+    assert!(residue.is_empty(), "tmp residue leaked: {residue:?}");
+  }
+
+  /// 扫描目录，收集文件名含 "tmp.pack" 的残留（两处清理断言共用）。
+  fn tmp_residue(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+      .unwrap()
+      .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+      .filter(|n| n.contains("tmp.pack"))
+      .collect()
   }
 }

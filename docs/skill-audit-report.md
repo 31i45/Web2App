@@ -1,5 +1,10 @@
 # Web2App 方法论 Skill 审计报告
 
+> 有效期：历史快照（评审时点事实）；下方状态说明列出已过期结论。
+> 最后验证：2026-10-18（commit 1add6dd）
+>
+> **状态说明**：本报告的 P0/P1 建议均已落地——ADR 约定见 docs/CROSS_PLATFORM_DESIGN.md §11，违禁词门禁见 .github/workflows/ci.yml 的 banned-words job，报告中「无任何 ADR」等表述已过期。
+
 > 用 `.skills/` 六阶段方法论（00-06）对 Web2App 做完整审计，验证 skill 有效性。
 > 审计日期：2026-10-18，代码版本：13dcb37（v3.0.2）
 

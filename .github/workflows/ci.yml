@@ -39,8 +39,19 @@ jobs:
       - name: Build child (debug; test/clippy 的前提)
         run: cargo build -p child --locked
 
-      - name: Tests
-        run: cargo test --locked --workspace
+      # 测试数门禁：套件规模只许增长不许缩水（低于基线即失败，防测试被静默删除）。
+      - name: Tests (gate: total passed >= 84)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --workspace 2>&1 | tee test.log
+          total=$(grep -oE '[0-9]+ passed' test.log | awk '{s+=$1} END {print s+0}')
+          echo "total passed: ${total}"
+          rm -f test.log
+          if [ "${total}" -lt 84 ]; then
+            echo "::error::test-count gate: expected >= 84 passed, got ${total}"
+            exit 1
+          fi
 
       - name: Clippy (zero warnings, warnings as errors)
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -60,8 +71,8 @@ jobs:
           if [ "$child" -gt 1048576 ]; then echo "::error::child exceeds 1MB promise ($child)"; exit 1; fi
           if [ "$master" -gt 2097152 ]; then echo "::error::web2app exceeds 2MB target ($master)"; exit 1; fi
 
-      # 结构性不可繁殖：child 产物不含写资源/签名/打包能力，且依赖图不含 master。
-      - name: Structural non-reproduction audit
+      # 结构隔离：child 产物不含写资源/签名/打包能力，且依赖图不含 master。
+      - name: Structural audit
         shell: pwsh
         run: ./audit.ps1 -ChildPath target/release/child.exe -MasterPath dist/web2app.exe
 
@@ -95,8 +106,19 @@ jobs:
       - name: Build child (debug; test/clippy 的前提)
         run: cargo build -p child --locked
 
-      - name: Tests
-        run: cargo test --locked --workspace
+      # 测试数门禁：同 verify (windows)——低于基线即失败，防测试被静默删除。
+      - name: Tests (gate: total passed >= 84)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --workspace 2>&1 | tee test.log
+          total=$(grep -oE '[0-9]+ passed' test.log | awk '{s+=$1} END {print s+0}')
+          echo "total passed: ${total}"
+          rm -f test.log
+          if [ "${total}" -lt 84 ]; then
+            echo "::error::test-count gate: expected >= 84 passed, got ${total}"
+            exit 1
+          fi
 
       - name: Clippy (zero warnings, warnings as errors)
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -108,7 +130,7 @@ jobs:
           cargo build -p child --release --locked
           cargo build --workspace --release --locked
 
-      # G-1：结构性不可繁殖审计（Linux 分支 = \x7fELF + e_shoff 映像计数）
+      # G-1：结构隔离审计（Linux 分支 = \x7fELF + e_shoff 映像计数）
       - name: Structural audit (ELF)
         shell: pwsh
         run: ./audit.ps1 -ChildPath target/release/child -MasterPath target/release/web2app
@@ -158,6 +180,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 版本三方等值门禁：tag 名 == 根 Cargo.toml [workspace.package].version。
+      # .deb control Version 由 CARGO_PKG_VERSION（同源于 workspace version）
+      # 编译期写入 → 校验此处一处即闭环 tag / Cargo.toml / .deb 三方。
+      - name: Version gate (tag == workspace version)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          echo "tag=${tag} cargo=${cargo_ver}"
+          if [ -z "${cargo_ver}" ] || [ "${tag}" != "${cargo_ver}" ]; then
+            echo "::error::tag version (${tag}) != workspace Cargo.toml version (${cargo_ver})"
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           target: x86_64-pc-windows-msvc
@@ -198,6 +235,19 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      # 版本三方等值门禁：同 build (windows)——tag / Cargo.toml / .deb 一处校验闭环。
+      - name: Version gate (tag == workspace version)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          echo "tag=${tag} cargo=${cargo_ver}"
+          if [ -z "${cargo_ver}" ] || [ "${tag}" != "${cargo_ver}" ]; then
+            echo "::error::tag version (${tag}) != workspace Cargo.toml version (${cargo_ver})"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 

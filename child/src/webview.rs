@@ -350,6 +350,8 @@ pub(crate) fn inject_script(home: &str) -> String {
 ///
 /// 页面层 `keydown` 与宿主层并存与否由 [`HOST_ONLY`] 决定：阶段 1 并存、
 /// 阶段 2 由宿主层独占。两层并存时 `goHome` 内的 200ms 时间戳去重防止同一次按键双重导航。
+///
+/// 行数说明：超 50 行豁免——函数体主体为单段 JS 格式化字面量，物理上不可拆分。
 fn home_hotkey_script(home: &str) -> String {
   let mut script = format!(
     r#"

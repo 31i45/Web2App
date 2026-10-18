@@ -1,5 +1,8 @@
 # Web2App 跨平台设计定稿（Linux `.deb` / macOS `.app`）
 
+> 有效期：跨平台机制或平台接缝事实变更时，变更处须同步复核全文。
+> 最后验证：2026-10-18（commit 1add6dd）
+
 > 状态：**设计定稿（Design Freeze）**。本文档是实施的唯一权威来源（single source of truth）。
 > 本文档仅描述**要做什么、按什么顺序做、如何验收**，不包含代码改动。
 > 适用对象：实现者（人或 AI coding agent）。

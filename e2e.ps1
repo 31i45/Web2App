@@ -215,7 +215,7 @@ try {
   Assert ($base.Length -eq $childBytes.Length) "product body length == child.exe (template copy)"
   $prefixSame = [System.Linq.Enumerable]::SequenceEqual([byte[]]$base, [byte[]]$childBytes)
   Assert $prefixSame "product body byte-identical to child.exe"
-  Assert ($base.Length -ne (Get-Item $MasterPath).Length) "product derives from child, not master (structural non-reproduction)"
+  Assert ($base.Length -ne (Get-Item $MasterPath).Length) "product derives from child, not master (structural isolation)"
 
   $ret2 = New-Product "second.io.exe" '{"url":"https://second.io","title":"second.io"}' $base
   $p2 = $ret2[0]

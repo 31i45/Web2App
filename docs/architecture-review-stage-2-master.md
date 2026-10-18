@@ -1,5 +1,8 @@
 # 架构评审 · 阶段 2：master
 
+> 有效期：历史评审快照（记录评审时点事实）；架构变更时需复核，内容不再代表当前状态。
+> 最后验证：2026-10-18（commit 1add6dd）
+
 > 方法论：`codebase-design` 深模块词汇 + `improve-codebase-architecture` 流程。
 > 约束：不修改任何代码，仅产出分析与建议。
 > 范围：`master/`（打包器）全部源码模块。

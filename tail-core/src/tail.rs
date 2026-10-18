@@ -185,6 +185,9 @@ fn locate_in(window: &[u8], file_len: u64) -> Frame {
   };
 
   // 1) v3：MAGIC | len | ver | crc
+  // 下方 unwrap 为何不会失败：进入此分支已保证 flen ≥ FOOTER_V3_LEN(29)，而窗口长
+  // = min(TAIL_WINDOW, flen) ≥ 29 → 末 29B 整体落在窗口内，fs / fs+24 均为窗口内
+  // 有效下标，at() 的越界检查恒通过（v2 分支同理：flen ≥ 24 → 窗口 ≥ 24）。
   if flen >= FOOTER_V3_LEN {
     let fs = flen - FOOTER_V3_LEN;
     let magic_ok = at(fs, TAIL_MAGIC.len()) == Some(&TAIL_MAGIC[..]);
