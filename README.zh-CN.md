@@ -239,9 +239,9 @@ wry 默认关闭了一批 WebView2/WebKitGTK 原生特性，产物按「桌面�
 | 指标 | 红线 / 目标 | 当前实测 |
 |---|---|---|
 | child.exe（用户分发产物） | **< 1 MiB，CI 硬门禁** | 约 703 KiB（719,360 B） |
-| web2app.exe（Windows 打包器） | **< 2 MiB，CI 硬门禁** | 约 1.48 MiB（1,554,432 B） |
+| web2app.exe（Windows 打包器） | **< 2 MiB，CI 硬门禁** | 约 1.49 MiB（1,560,064 B） |
 | Linux `.deb`（用户分发产物） | < 1 MB | 约 430 KB（依赖系统 WebKitGTK，零内嵌引擎） |
-| Linux 打包器裸 ELF | — | 约 1.85 MiB（1,944,576 B） |
+| Linux 打包器裸 ELF | — | 约 1.85 MiB（1,944,880 B） |
 | 关闭残留 | 零进程 / 零临时文件 | e2e 断言：300 ms 看门狗上限，WebView 子进程全部退出 |
 | 运行副作用 | exe 目录零落盘、release 无控制台 | e2e 比对运行前后目录文件数；`windows_subsystem = "windows"` 仅 release 生效 |
 | 冷启动 | 秒级 | 经验值（暂无自动化基准） |

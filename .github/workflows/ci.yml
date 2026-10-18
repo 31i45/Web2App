@@ -221,6 +221,11 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/release/web2app "dist/web2app-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          size=$(wc -c < "dist/web2app-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu")
+          if [ "$size" -gt 2097152 ]; then
+            echo "::error::bare ELF exceeds 2MB target ($size bytes)"
+            exit 1
+          fi
           chmod +x dist/web2app-*
           ls -l dist
 

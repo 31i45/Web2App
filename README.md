@@ -239,9 +239,9 @@ Size numbers are measured from the release profile and drift with the toolchain;
 | Metric | Red line / target | Current measurement |
 |---|---|---|
 | child.exe (user-shipped product) | **< 1 MiB, CI hard gate** | ~703 KiB (719,360 B) |
-| web2app.exe (Windows packager) | **< 2 MiB, CI hard gate** | ~1.48 MiB (1,554,432 B) |
+| web2app.exe (Windows packager) | **< 2 MiB, CI hard gate** | ~1.49 MiB (1,560,064 B) |
 | Linux `.deb` (user-shipped product) | < 1 MB | ~430 KB (system WebKitGTK, zero embedded engine) |
-| Linux packager bare ELF | — | ~1.85 MiB (1,944,576 B) |
+| Linux packager bare ELF | — | ~1.85 MiB (1,944,880 B) |
 | Close residue | Zero processes / zero temp files | e2e asserts: 300 ms watchdog ceiling, all WebView child processes exit |
 | Runtime side effects | Zero file drops next to the exe; no console in release | e2e diffs directory file count before/after; `windows_subsystem = "windows"` applies to release only |
 | Cold start | Seconds | Empirical (no automated benchmark yet) |

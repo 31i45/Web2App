@@ -24,10 +24,11 @@
 
 ## 2. 数字红线（Skill 03 A2）
 
-| 数字 | 红线/目标 | 实测（2026-10-18） |
+| 数字 | 红线/目标 | 实测（v3.0.3） |
 |---|---|---|
 | child.exe 体积 | < 1 MiB（CI 硬门禁） | 719,360 B (~702 KiB) |
-| web2app.exe 体积 | < 2 MiB（CI 硬门禁） | 1,554,432 B (~1.48 MiB) |
+| web2app.exe 体积 | < 2 MiB（CI 硬门禁） | 1,560,064 B (~1.49 MiB) |
+| Linux 打包器裸 ELF | < 2 MiB（build-linux CI 断言，2026-10-18 补设） | 1,944,880 B (~1.85 MiB) |
 | 单元测试数 | ≥ 84（tail-core 42 / child 19 / master 23） | 84 |
 | e2e 断言数 | Windows ≥ 30 / Linux ≥ 37 | 30 / 37 |
 

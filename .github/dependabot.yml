@@ -5,8 +5,18 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # windows-sys 0.60+ 移除 BOOL 等类型，与当前 wry/tao 传递依赖破坏不兼容
+      # （2026-10-18 本地实测编译失败）；待 wry/tao 上游迁移后解除
+      - dependency-name: "windows-sys"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
   # CI 自身动作的版本维护（checkout/rust-cache/upload-artifact 等）
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # 动作连跳多个大版本（v4→v7/v8）有行为变更风险，主动评估后手动升级，
+      # 常规只收小版本
+      - dependency-name: "actions/*"
+        update-types: ["version-update:semver-major"]
