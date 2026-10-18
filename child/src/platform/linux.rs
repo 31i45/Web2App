@@ -191,6 +191,62 @@ pub(crate) fn mount_webview<'a>(
 }
 
 // ============================================================================
+// 文档起始脚本（接缝项）：Linux 独占的 HTML5 全屏守卫
+// ============================================================================
+
+/// Linux 独占：把 HTML5 全屏请求整体降级为安全 no-op（`None` 不存在于此平台）。
+///
+/// **为什么**（VM 实测，见 `docs/PLATFORM_SEAM_NOTES.md` §3.8）：WebKitGTK 2.50.4 处理
+/// HTML5 全屏请求时会走到 WebKit 内部一条 `RELEASE_ASSERT` 路径 → **UI 进程 SIGABRT**
+/// （整个应用闪退），且 embedder **无法拦截**——与有无窗口管理器、是否挂
+/// `enter-fullscreen` 处理器（返回 true/false）均无关（VM 三组对照实测）。
+///
+/// 故本平台**不提供** HTML5 全屏能力，改在文档起始把入口置为不可用（见
+/// [`FULLSCREEN_GUARD`]）：`fullscreenEnabled` 读作 `false` 使守规范的站点自隐藏全屏按钮，
+/// 强行调用者拿到 promise rejection 而非崩溃。这是**能力的诚实缺失**，不是行为退化。
+///
+/// 做成接缝项（而非 `webview.rs` 内 `#[cfg(target_os = "linux")]` 分支）的理由：平台判断
+/// 只在 `platform/`（§3.4），且 `webview.rs` 的 cfg 豁免面刻意收窄（同 `mount_webview`，
+/// 见 `docs/PLATFORM_SEAM_NOTES.md` §4 的两处明文豁免）。
+pub(crate) fn document_start_script() -> Option<&'static str> {
+  Some(FULLSCREEN_GUARD)
+}
+
+/// 见 [`document_start_script`]。覆盖「四个入口 + 两个只读标志」，不触碰 DOM
+/// （站点原样呈现，INV-4）。
+///
+/// **未覆盖的残余**：WebKitGTK **原生视频控件**自带的全屏按钮在 WebKit 内部（C++）发起，
+/// 不经 JS 原型 → 本守卫不可达（embedder 亦无法拦截，见 §3.8 的兜底说明）。
+const FULLSCREEN_GUARD: &str = r#"
+(function () {
+  var deny = function () {
+    return Promise.reject(new Error('Web2App: fullscreen is unavailable on this platform'));
+  };
+  var groups = [
+    [Element.prototype, ['requestFullscreen', 'webkitRequestFullscreen', 'webkitRequestFullScreen']],
+    [HTMLVideoElement.prototype, ['webkitEnterFullscreen']]
+  ];
+  groups.forEach(function (group) {
+    if (!group[0]) { return; }
+    group[1].forEach(function (name) {
+      try {
+        Object.defineProperty(group[0], name, {
+          value: deny, writable: true, configurable: true
+        });
+      } catch (e) {}
+    });
+  });
+  ['fullscreenEnabled', 'webkitFullscreenEnabled'].forEach(function (name) {
+    try {
+      Object.defineProperty(document, name, {
+        get: function () { return false; }, configurable: true
+      });
+    } catch (e) {}
+  });
+})();
+"#;
+
+// ============================================================================
 // External：交给系统默认程序
 // ============================================================================
 
@@ -533,5 +589,28 @@ mod tests {
     assert!(!is_home_accel(home, gdk::ModifierType::SHIFT_MASK));
     // Alt 叠加额外修饰仍命中（Windows 亦只看 Alt）
     assert!(is_home_accel(home, alt | gdk::ModifierType::SHIFT_MASK));
+  }
+
+  /// 全屏守卫必须覆盖四个入口与两个只读标志——少一个入口就仍可能走到 SIGABRT 路径。
+  #[test]
+  fn fullscreen_guard_covers_all_entry_points() {
+    let script = document_start_script().expect("linux 必须有文档起始脚本");
+    for name in [
+      "requestFullscreen",
+      "webkitRequestFullscreen",
+      "webkitRequestFullScreen",
+      "webkitEnterFullscreen",
+    ] {
+      assert!(script.contains(name), "缺少入口 {name}: {script}");
+    }
+    for flag in ["fullscreenEnabled", "webkitFullscreenEnabled"] {
+      assert!(script.contains(flag), "缺少只读标志 {flag}: {script}");
+    }
+    assert!(
+      script.contains("Element.prototype")
+        && script.contains("HTMLVideoElement.prototype")
+        && script.contains("defineProperty(document"),
+      "守卫未安装在原型/文档上: {script}"
+    );
   }
 }

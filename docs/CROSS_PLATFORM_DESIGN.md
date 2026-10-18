@@ -44,7 +44,8 @@
 
 建窗方式、按键拦截机制、关闭钩子、文件图标注入、打包格式与签名；弹窗的 ipc 通道
 （Linux 上弹窗文档承载在发起方 UCM 上，消息须由主窗处理器按 id 回投，见
-`docs/PLATFORM_SEAM_NOTES.md` §3.7）。
+`docs/PLATFORM_SEAM_NOTES.md` §3.7）；HTML5 全屏守卫（Linux 上请求全屏即 SIGABRT，
+改在文档起始把入口置 no-op，见 `docs/PLATFORM_SEAM_NOTES.md` §3.8）。
 
 > **设计铁律**：不变量必须跨平台完全保持；偶然实现**禁止**为统一而抽象——见 §11 ADR-1/ADR-2。
 
@@ -142,7 +143,7 @@ pub(crate) fn install_close_watchdog(handle: isize);
 
 ### 4.3 🔨 平台重写（同签名 cfg 模块）
 
-弹窗窗口管线及其导航/关闭；宿主层按键机制；致命错误呈现；关闭看门狗；文件图标与签名；master 打包器。
+弹窗窗口管线及其导航/关闭；宿主层按键机制；致命错误呈现；关闭看门狗；文件图标与签名；文档起始脚本（Linux 全屏守卫，见 `docs/PLATFORM_SEAM_NOTES.md` §3.8）；master 打包器。
 
 > **重要**：重写后的 Unix 侧应比 Windows 侧**更短**——Windows 的裸 Win32 消息泵（`PostMessageW`/`WM_APP_HOME`/`DefWindowProcW` 子类化）是 Win32 约束的产物，在 GTK/Cocoa 上退化为普通闭包。**移植 ≠ 照搬**。
 
@@ -162,7 +163,7 @@ pub(crate) fn install_close_watchdog(handle: isize);
 | 缩放 ±/0 | `with_hotkeys_zoom` | `WebViewExtUnix::zoom` + 接线 | `setPageZoom` + 菜单 |
 | 查找 / 打印 | 须实测 V-1 | 自建 | 菜单项 |
 | 复制/粘贴/全选/撤销 | 内容层 | 内容层 | **依赖标准 Edit 菜单**（否则 ⌘C/V 失效） |
-| 视频全屏 | 注入桥 + 宿主全屏 | 需处理 WebKitGTK `enter-fullscreen`（V-4） | 原生支持 |
+| 视频全屏 | 注入桥 + 宿主全屏 | **不支持**：请求全屏即 SIGABRT（V-4），文档起始置 no-op | 原生支持 |
 
 **铁律**：**绝不注册编辑类键**（Ctrl/⌘ + C/V/X/A、撤销/重做）——app 级加速器抢占即毁掉输入。
 
@@ -294,7 +295,7 @@ Contents/MacOS/<name>  Contents/Resources/<name>.icns  Contents/Info.plist
 |---|---|---|---|
 | V-1 | Windows 基准快捷键是否真由引擎提供 | 在现有 exe 逐条实测，产出**基准表** | 显式决定"匹配基准"或"刻意超出" |
 | V-3 | GTK 按键拦截归属（AccelGroup 可能看不到 F5/Ctrl+R） | 无头 CI 按键 × 焦点矩阵，试三种候选 | 改用组件级 `key-press-event` |
-| V-4 | WebKitGTK 视频全屏是否需处理 `enter-fullscreen` | Linux 实测 | 显式接线 |
+| V-4 | WebKitGTK HTML5 全屏是否需处理 `enter-fullscreen` | Linux 实测（VM 完成） | **已定论：embedder 不可拦截** → 不接事件，改在文档起始把全屏入口置 no-op（`docs/PLATFORM_SEAM_NOTES.md` §3.8） |
 | V-5 | wry child-webview `performKeyEquivalent` 影响弹窗菜单键 | macOS 真机 spike | `NSEvent` local monitor 兜底 |
 | V-6 | Linux `WebContext.data_directory` 是否隔离 | CI 检查 cookie/localStorage 路径 | 显式传 per-app 数据目录 |
 | V-7 | WebKitGTK 缺 Navigation API 时回首页回退路径 | Linux 实测 | 确认降级为整页导航，调整声明 |

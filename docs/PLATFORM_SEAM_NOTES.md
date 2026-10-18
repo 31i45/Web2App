@@ -33,6 +33,7 @@
 | `set_fullscreen` | `fn set_fullscreen(handle: isize, on: bool)` |
 | `popup_ipc` | `fn popup_ipc(handle: isize, action: crate::popup::PopupIpc)` |
 | `mount_webview` | `fn mount_webview<'a>(builder: wry::WebViewBuilder<'a>, window: &'a tao::window::Window) -> Result<wry::WebView, wry::Error>` |
+| `document_start_script` | `fn document_start_script() -> Option<&'static str>` |
 
 **各平台私有**（不进接缝面，仅在各自 `platform/<os>.rs` 内）：`VK_HOME` /
 `is_home_accel`（Windows 四参纯判定）/ `register_home_accel` 与全部裸 Win32 弹窗管线
@@ -85,8 +86,10 @@
 | `create_popup` | 裸 Win32 顶层窗 + **同 Environment** 的 WebView2（`NewWindowResponse::Create`） | **已落（T-1-1）**：GTK 顶层窗 + `NewWindowResponse::Create { webview }`（载荷 `webkit2gtk::WebView`，`build_gtk` 挂自建容器） | 无 |
 | `navigate_popup` | 弹窗内「站内就地导航」路由调用 | **已落（T-1-1）**：`POPUPS[id].webview.load_url` | 无 |
 | `close_all_popups` | 回收 `thread_local` 弹窗 WebView 表 | **已落（T-1-1）**：取窗口快照后 `close()`（防借用重入），`connect_destroy` 摘表 | 无 |
-| `set_fullscreen` | Win32 窗口样式 + 矩形切换 | **已落（T-1-1）**：克隆窗口后 `gtk Window fullscreen/unfullscreen`；ipc `w2a:fullscreen:` → 主窗走 tao `set_fullscreen` | V-4 视频全屏实测 |
+| `popup_ipc` | 不可达 no-op（弹窗各有独立 controller 与 ipc 处理器） | **已落（批次 2）**：按消息内嵌 id 回投——`Close → close_popup`、`Fullscreen → set_fullscreen`，见 §3.7 | 无 |
+| `set_fullscreen` | Win32 窗口样式 + 矩形切换 | **已落（T-1-1）**：克隆窗口后 `gtk Window fullscreen/unfullscreen`；ipc `w2a:fullscreen:` → 主窗走 tao `set_fullscreen` | 无（V-4 收口见 §3.8） |
 | `mount_webview` | 直通 `builder.build(window)`（等价于接线前） | `builder.build_gtk(window.default_vbox())`；`default_vbox` 为 `None` 时回落直通 | 无（T-1-1 已落地：两 GDK 后端实测通过） |
+| `document_start_script` | `None`（WebView2 的 HTML5 全屏链路正常，无需守卫） | **已落（B1）**：`Some(FULLSCREEN_GUARD)`——四个全屏入口置 no-op + `fullscreenEnabled=false`，见 §3.8 | 无（V-4 收口） |
 | `strip_verbatim_prefix` | 剥离 `\\?\` 形态 | **恒等**（Unix 无该前缀） | 无 |
 | `pack` | `builder.rs` 编排骨架 re-export | **已落（T-1-4）**：staging 组装 → 同一骨架产 ELF+tail → `dpkg-deb` 原生封装，见 §3.3 | 无 |
 | `inject_file_icon` | `UpdateResource` 注入 `.rsrc` | `Ok(())`（无此机制：ELF 无 `.rsrc`；图标经 staging 落 `/usr/share/icons/hicolor/256x256/apps/`，见 §3.3） | 无 |
@@ -281,6 +284,46 @@ UCM 承载弹窗文档，弹窗 `WebViewBuilder` 传入的 UCM 被忽略。
    （对照：修复前弹窗存活、进程存活）；
 2. 弹窗页发出的 `fullscreen:1` → **弹窗**全屏（1280x800@0,0），主窗保持 1100x750
    （对照：修复前主窗被全屏、弹窗不动）。
+
+### 3.8 Linux HTML5 全屏：请求即 SIGABRT → 文档起始置 no-op（B1 收口）
+
+**结论**：Linux 侧**不提供** HTML5 全屏能力。接缝项 `document_start_script()`
+（`platform/linux.rs`）返回 `FULLSCREEN_GUARD`，在**文档起始**把全屏入口覆写为「返回
+rejected promise 的 no-op」，并把 `document.fullscreenEnabled` / `webkitFullscreenEnabled`
+读作 `false`。
+
+**为什么（平台事实）**：WebKitGTK 2.50.4 处理 HTML5 全屏请求时走 WebKit 内部一条
+`RELEASE_ASSERT` 路径 → **UI 进程 SIGABRT**（整个应用闪退）。**embedder 无法拦截**：与有无
+窗口管理器、是否挂 `enter-fullscreen` 处理器（返回 `true` / `false`）均无关（三组对照实测）。
+即 V-4 的答案是「消灭请求入口」，而非「处理事件」。
+
+**为何拦在「文档起始 / JS 原型」**：请求由页面 JS 发起（`Element.requestFullscreen`），
+宿主侧 `enter-fullscreen` 发生在 WebKit **已决定全屏之后**，拦不到；从原型覆写是唯一在请求
+进入 WebKit 之前的位置。覆写**不触碰 DOM**，站点原样呈现（INV-4）。
+
+**覆盖面**：`Element.prototype` 的 `requestFullscreen` / `webkitRequestFullscreen` /
+`webkitRequestFullScreen`，加 `HTMLVideoElement.prototype.webkitEnterFullscreen`（遗留入口）；
+`fullscreenEnabled` 读 `false` 使守规范的站点自隐藏全屏按钮（不调用即不崩）。
+
+**通道**：经接缝项追加进**主窗** builder 的初始化脚本（与 `INJECT_SCRIPT` / `CLOSE_GUARD`
+同一 UCM）→ 主窗与 Linux 弹窗文档同样生效（弹窗文档承载在发起方 UCM 上，见 §3.7）。
+
+**残余（诚实登记，未覆盖）**：WebKitGTK **原生视频控件**自带的全屏按钮在 WebKit 内部（C++）
+发起，不经 JS 原型 → 本守卫不可达（同「embedder 无法拦截」）。实测代价（真实可解码视频 +
+定位原生控件按钮）与收益不成比例，故**不实测**、不宣称覆盖。
+
+**VM 实测（Zorin，Xvfb + xdotool + 真实 `tail` 产物；媒体已加载 `readyState=4`）**：
+1. 载入期 `document.body.requestFullscreen()` → 拒绝于 `Web2App: fullscreen is unavailable…`
+   （守卫自有错误，非 WebKit 的 `NotAllowedError`）；`document.fullscreenEnabled === false`；
+2. **用户手势点击** element 全屏按钮（历史崩溃路径）→ 进程存活、stderr 无 GTK critical / abort；
+3. 媒体已加载时点击 `video.webkitEnterFullscreen()` → 返回 Promise（即本守卫）、进程存活；
+4. **红对照**：同一点击、同一 `--pack` 流程，但内嵌的是**未含本守卫**的 child 模板 → `SIGABRT`
+   （stderr `Aborted`）。故本条 3 不是「无从证伪」的孤证。
+
+> **构建注意（实测踩坑）**：`master` 经 `build.rs` 在**构建期**把 `child` 内嵌为
+> `CHILD_TEMPLATE`。只跑 `cargo build --workspace` 时 cargo 不保证 child 先于 master 的
+> build script 完成 → 产物可能内嵌**陈旧 child**。做产物级验证必须
+> `cargo build -p child && cargo build -p master`（`build.ps1` 即此序）。
 
 ---
 

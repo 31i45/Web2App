@@ -249,6 +249,13 @@ pub fn build_webview<'a>(
       }
     });
 
+  // 平台独占的「文档起始脚本」（本平台有缺口才返回 `Some`，见 `platform` 同名项文档）：
+  // Linux 侧把 HTML5 全屏入口置 no-op——那里的全屏请求会使 WebKitGTK 进程 SIGABRT。
+  // 追加进同一 UCM 的初始化脚本，故在主窗与 Linux 弹窗文档中都会生效（§3.7）。
+  if let Some(guard) = crate::platform::document_start_script() {
+    builder = builder.with_initialization_script(guard);
+  }
+
   if cfg!(debug_assertions) {
     builder = builder.with_devtools(true);
   }
