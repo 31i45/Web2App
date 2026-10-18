@@ -23,7 +23,7 @@ png = "0.18"
 # wry 未 re-export 该类型 → 必须直接依赖。版本与 wry 传递依赖一致，
 # 不引入任何新 crate、不增加产物体积（见 audit.ps1 的 cargo tree 断言）。
 webview2-com = "0.39"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 
 # Release 产物极致轻量：全 workspace 共享同一组优化开关。
 # panic=abort 仅作用于 release；测试走 dev profile（unwind），不受影响。
