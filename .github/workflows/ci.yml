@@ -228,7 +228,8 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # Linux 发布：打包器自身的 .deb（用户 apt install 后即得 GUI 打包器）。
+  # Linux 发布：打包器裸 ELF（分发形态与 Windows 裸 exe 对称，绿色即用；不产 .deb，
+  # 理由见下方 Stage bare ELF）。
   # 同样钉 ubuntu-22.04——发布产物的 glibc 基线（见 verify-linux 注释）。
   build-linux:
     name: build (linux)
