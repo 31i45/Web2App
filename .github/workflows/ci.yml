@@ -40,7 +40,9 @@ jobs:
         run: cargo build -p child --locked
 
       # 测试数门禁：套件规模只许增长不许缩水（低于基线即失败，防测试被静默删除）。
-      - name: Tests (gate: total passed >= 84)
+      # 注意：name 值含 "gate: "（冒号+空格）属 YAML 敏感字符，必须整串加引号，
+      # 否则解析器将其误判为嵌套 mapping 导致整个工作流无法加载（2026-10-19 实测）。
+      - name: "Tests (gate: total passed >= 84)"
         shell: bash
         run: |
           set -euo pipefail
@@ -107,7 +109,7 @@ jobs:
         run: cargo build -p child --locked
 
       # 测试数门禁：同 verify (windows)——低于基线即失败，防测试被静默删除。
-      - name: Tests (gate: total passed >= 84)
+      - name: "Tests (gate: total passed >= 84)"
         shell: bash
         run: |
           set -euo pipefail
