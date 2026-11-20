@@ -1,0 +1,28 @@
+# cargo-deny 配置 — license / bans / advisories / sources
+# 文档：https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# 允许 unmaintained 警告（paste / proc-macro-error 是 wry 传递依赖，无实际风险）
+unmaintained = "allow"
+# 允许 unsound 警告（理论性，实践中无触发风险）
+unsound = "allow"
+# 只有 critical / high 阻断 CI（中低危开 Issue 但不 fail）
+severity = "high"
+# ignore list — 已确认安全的传递依赖（wry / tao 生态内）
+ignore = [
+  # 传递依赖（wry 引入），非本项目直接依赖；无实际安全影响
+  "RUSTSEC-2024-0436",   # paste — unmaintained
+  "RUSTSEC-2024-0437",   # proc-macro-error — unmaintained
+]
+
+[bans]
+# 暂不禁止特定 crate（保持开放；如发现恶意 crate 在此添加）
+# 示例："evil-crate" = { reason = "...", recommended = "..." }
+
+[licenses]
+# 强制 MIT / Apache-2.0 兼容生态（webview 生态 license 均兼容）
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Zlib", "MPL-2.0"]
+default = "deny"
+
+[target]
+permitted = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
