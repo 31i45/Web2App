@@ -16,7 +16,8 @@ tail-core = { path = "tail-core" }
 # 与 `tao/x11`，使 X11 形态的窗口句柄可被接管。二者引用的依赖在 wry 内均声明为
 # 「仅 Linux/BSD 目标」的可选依赖 → Windows 目标下启用它们是空操作（不进依赖图、
 # 不影响产物），且这正是 wry 的默认特性组合，故跨平台统一开启。
-wry = { version = "0.57", default-features = false, features = ["devtools", "os-webview", "x11"] }
+# wry 精确 pin 0.57.1（跳过 0.57.2 Linux E2E 回归；手动处理 → 手动升 0.57.3+）
+wry = { version = "=0.57.1", default-features = false, features = ["devtools", "os-webview", "x11"] }
 tao = "0.37"
 png = "0.18"
 # 宿主层 Alt+Home 需要 `ICoreWebView2Controller::add_AcceleratorKeyPressed`，
