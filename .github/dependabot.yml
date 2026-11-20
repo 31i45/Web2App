@@ -1,22 +1,46 @@
 version: 2
 updates:
-  # 依赖版本更新 PR（漏洞告警另需仓库 Settings → Security → Dependabot 手工开启）
+  # === Cargo 依赖 ===
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
+      # daily 比 weekly 更及时响应安全漏洞（security > latest 优先级）
+      interval: daily
+      time: "04:00"
+    open-pull-requests-limit: 10
+    # Patch 版本走 Task 3 的 auto-approve workflow 自动合并；
+    # Minor/Major 被 branch protection 挡掉，需手动审查。
+    groups:
+      # WebView 核心（wry / tao / webview2-com 版本必须同步，分开升会编译失败）
+      webview-core:
+        patterns:
+          - "wry"
+          - "tao"
+          - "webview2-com*"
+      # 解析器 / 格式库（html/url/base64/png 通常 patch 安全）
+      parsers:
+        patterns:
+          - "*html*"
+          - "*url*"
+          - "*base64*"
+          - "*png*"
     ignore:
-      # windows-sys 0.60+ 移除 BOOL 等类型，与当前 wry/tao 传递依赖破坏不兼容
-      # （2026-10-18 本地实测编译失败）；待 wry/tao 上游迁移后解除
+      # windows-sys 0.60+ 移除 BOOL 等类型，破坏 wry/tao 传递依赖（2026-10-18 本地实测）
       - dependency-name: "windows-sys"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
-  # CI 自身动作的版本维护（checkout/rust-cache/upload-artifact 等）
+      # wry 0.57.2 Linux E2E 回归（#1915 合成事件坐标修复引入新问题）；
+      # patch 升级暂时跳过 → 需手动改 Cargo.toml pin + 移除本条目后才能自动收 patch。
+      - dependency-name: "wry"
+        update-types: ["version-update:semver-patch"]
+
+  # === GitHub Actions ===
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    # Actions patch（checkout v4.1.x / cache v2.x）CI 稳定，由 Task 3 auto-approve 自动合；
+    # Major（v4→v7）行为变更风险大，需手动审查。
     ignore:
-      # 动作连跳多个大版本（v4→v7/v8）有行为变更风险，主动评估后手动升级，
-      # 常规只收小版本
       - dependency-name: "actions/*"
         update-types: ["version-update:semver-major"]
