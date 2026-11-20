@@ -42,7 +42,7 @@ jobs:
       # 参数说明见 https://github.com/dependabot/fetch-metadata#readme
       - name: Wait for CI to pass
         if: steps.classify.outputs.approved == 'true'
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
           skip-verification: false  # 必须 CI 绿才继续（参数名是 skip-verification，不是 skip-verify）
