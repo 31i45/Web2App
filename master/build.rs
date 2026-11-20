@@ -50,7 +50,10 @@ fn main() {
       let mut diag = String::new();
       for c in candidates.into_iter().flatten() {
         let kind = match c.metadata() {
-          Ok(m) => format!("{} ({})", m.len(), m.file_type().is_file().then_some("file").unwrap_or("other")),
+          Ok(m) => {
+            let desc = if m.file_type().is_file() { "file" } else { "other" };
+            format!("{} ({})", m.len(), desc)
+          }
           Err(_) => "not found".to_string(),
         };
         diag.push_str(&format!("  {} → {}\n", c.display(), kind));
