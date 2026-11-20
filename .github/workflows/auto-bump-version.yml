@@ -59,9 +59,11 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         run: |
           PR_NUM=${{ github.event.pull_request.number }}
-          # 用 GitHub API 拉 PR 修改文件列表；允许 Cargo.lock / Cargo.toml / dependabot.yml
-          ALLOWED='Cargo.lock|Cargo.toml|dependabot.yml|dependabot.yaml|package.json|package-lock.json'
-          CHANGED=$(curl -s "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/files" \
+          # 允许 Cargo.lock / Cargo.toml / dependabot.yml — 纯 Rust 项目无前端包文件
+          ALLOWED='Cargo.lock|Cargo.toml|dependabot.yml|dependabot.yaml'
+          # GitHub API 需 Authorization（private 仓库必须；public 仓库也带上无副作用）
+          CHANGED=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/files" \
             | jq -r '.[].filename')
           BAD=""
           while IFS= read -r f; do

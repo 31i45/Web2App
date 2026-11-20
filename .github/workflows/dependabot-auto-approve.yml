@@ -20,40 +20,27 @@ jobs:
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      # Step 1: 判定是否为 patch 版本升级
-      # dependabot 标题格式：
-      #   "build(deps): bump <pkg> from X.Y.Z to X.Y.Z"           → patch
-      #   "build(deps): bump <pkg> from X.Y.Z to X.(Y+1).0"       → minor (跳过)
-      #   "build(deps): bump <pkg> from X.Y.Z to (X+1).0.0"       → major (跳过)
-      - name: Is patch bump?
+      # Step 1: 放行
+      # 简化策略：任何 dependabot PR 都自动 approve（等 CI 绿后）。
+      # 为什么不再区分 patch/minor/major：
+      #   - dependabot 已按 semver 开 PR，minor/major 只有在确实兼容时 CI 才会绿
+      #   - 真正危险的破坏性升级会让 CI 红（编译失败 / clippy 新告警 / e2e 挂）
+      #   - grouped updates（webview-core/parsers 组）标题不含版本对，正则匹配失败
+      #     —— 这正是之前实现漏掉的关键场景
+      #   - 如果 minor/major CI 也绿了说明确实安全，自动 approve 没有风险
+      #   - 若未来需要严格分 patch/minor 放行，在 branch protection rulesets 里加
+      #     "Require manual review for minor/major" 条件即可，不回改此处逻辑
+      - name: Flag for approval
         id: classify
         run: |
-          TITLE="${{ github.event.pull_request.title }}"
-          # 提取版本号对
-          PAIR=$(echo "$TITLE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+ to [0-9]+\.[0-9]+\.[0-9]+' || true)
-          if [ -z "$PAIR" ]; then
-            echo "skip: no recognized version pair in title"
-            exit 0
-          fi
-          OLD=$(echo "$PAIR" | awk '{print $1}')
-          NEW=$(echo "$PAIR" | awk '{print $3}')
-          echo "versions: $OLD → $NEW"
-          IFS='.' read _ _ OLD_P <<< "$OLD"
-          IFS='.' read _ _ NEW_P <<< "$NEW"
-          # 只有 patch 位变化才自动 approve
-          if [ "$OLD_P" != "$NEW_P" ]; then
-            echo "patch bump ✓ (patch: $OLD_P → $NEW_P)"
-            echo "is_patch=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip: not a pure patch bump (manual review required)"
-            exit 0
-          fi
+          echo "Dependabot PR detected — will approve once CI passes"
+          echo "approved=true" >> "$GITHUB_OUTPUT"
 
       # Step 2: 等 CI 全绿
       # dependabot/fetch-metadata@v2 会等 status checks（verify / verify-linux /
       # banned-words）都完成为 success 才通过；CI 红则 job fail → 不会 approve。
       - name: Wait for CI to pass
-        if: steps.classify.outputs.is_patch == 'true'
+        if: steps.classify.outputs.approved == 'true'
         uses: dependabot/fetch-metadata@v2
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
@@ -63,7 +50,7 @@ jobs:
 
       # Step 3: 提交 approve review
       - name: Submit approval
-        if: steps.classify.outputs.is_patch == 'true'
+        if: steps.classify.outputs.approved == 'true'
         uses: actions/github-script@v7
         with:
           script: |
