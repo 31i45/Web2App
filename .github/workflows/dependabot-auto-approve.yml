@@ -39,14 +39,13 @@ jobs:
       # Step 2: 等 CI 全绿
       # dependabot/fetch-metadata@v2 会等 status checks（verify / verify-linux /
       # banned-words）都完成为 success 才通过；CI 红则 job fail → 不会 approve。
+      # 参数说明见 https://github.com/dependabot/fetch-metadata#readme
       - name: Wait for CI to pass
         if: steps.classify.outputs.approved == 'true'
         uses: dependabot/fetch-metadata@v2
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
-          skip-verify: false    # 必须 CI 绿才继续
-          interval-seconds: 15  # 每 15s poll 一次
-          wait-for-pull-request-update: true
+          skip-verification: false  # 必须 CI 绿才继续（参数名是 skip-verification，不是 skip-verify）
 
       # Step 3: 提交 approve review
       - name: Submit approval
