@@ -1,0 +1,77 @@
+name: Dependabot Auto-Approve
+
+# 仅对 dependabot PR 生效：patch 版本等 CI 绿后自动 approve，满足 branch protection
+# 的 "Require pull request reviews before merging" 条件，让 auto-merge 能触发。
+#
+# 注意：dependabot PR 上的 workflow 需用 pull_request_target trigger 才能拿到足够
+# GITHUB_TOKEN 权限；配合 permissions 声明最小权限。
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write        # approve 需要 write；pull_request_target 下有效
+
+jobs:
+  auto-approve:
+    # 只处理 dependabot 开的 PR
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: 判定是否为 patch 版本升级
+      # dependabot 标题格式：
+      #   "build(deps): bump <pkg> from X.Y.Z to X.Y.Z"           → patch
+      #   "build(deps): bump <pkg> from X.Y.Z to X.(Y+1).0"       → minor (跳过)
+      #   "build(deps): bump <pkg> from X.Y.Z to (X+1).0.0"       → major (跳过)
+      - name: Is patch bump?
+        id: classify
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          # 提取版本号对
+          PAIR=$(echo "$TITLE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+ to [0-9]+\.[0-9]+\.[0-9]+' || true)
+          if [ -z "$PAIR" ]; then
+            echo "skip: no recognized version pair in title"
+            exit 0
+          fi
+          OLD=$(echo "$PAIR" | awk '{print $1}')
+          NEW=$(echo "$PAIR" | awk '{print $3}')
+          echo "versions: $OLD → $NEW"
+          IFS='.' read _ _ OLD_P <<< "$OLD"
+          IFS='.' read _ _ NEW_P <<< "$NEW"
+          # 只有 patch 位变化才自动 approve
+          if [ "$OLD_P" != "$NEW_P" ]; then
+            echo "patch bump ✓ (patch: $OLD_P → $NEW_P)"
+            echo "is_patch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip: not a pure patch bump (manual review required)"
+            exit 0
+          fi
+
+      # Step 2: 等 CI 全绿
+      # dependabot/fetch-metadata@v2 会等 status checks（verify / verify-linux /
+      # banned-words）都完成为 success 才通过；CI 红则 job fail → 不会 approve。
+      - name: Wait for CI to pass
+        if: steps.classify.outputs.is_patch == 'true'
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+          skip-verify: false    # 必须 CI 绿才继续
+          interval-seconds: 15  # 每 15s poll 一次
+          wait-for-pull-request-update: true
+
+      # Step 3: 提交 approve review
+      - name: Submit approval
+        if: steps.classify.outputs.is_patch == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              event: 'APPROVE',
+              body: '🤖 Auto-approved by Dependabot Auto-Approve: patch bump, CI all green.'
+            });
+            console.log(`✅ Approved PR #${context.issue.number}`);
