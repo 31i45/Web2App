@@ -20,6 +20,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Run the full gates and publish the next patch release from main
+        required: true
+        type: boolean
+        default: false
 
 # 同一 ref 的新推送取消旧运行；tag 与 main 发布运行不取消（保证发布完整性）
 concurrency:
@@ -189,14 +195,19 @@ jobs:
           echo "banned-words scan: clean"
 
   # 发布准备：三项门禁全绿后，算下一个 patch 版本 → 同步 Cargo.lock → 提交 → 打 tag。
-  # 只在 push 到 main 时执行；release 自身产生的 "chore(release): ..." 提交不再触发。
+  # 普通 main push 或 Dependabot 合并后的显式 release dispatch 执行；
+  # release 自身产生的 "chore(release): ..." 提交不再触发。
   prepare-release:
     name: prepare release
     needs: [verify, verify-linux, banned-words]
     if: >-
-      github.event_name == 'push'
-      && github.ref == 'refs/heads/main'
-      && !startsWith(github.event.head_commit.message, 'chore(release):')
+      github.ref == 'refs/heads/main'
+      && (
+        (github.event_name == 'push'
+          && !startsWith(github.event.head_commit.message, 'chore(release):'))
+        || (github.event_name == 'workflow_dispatch'
+          && github.event.inputs.release == 'true')
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: write
