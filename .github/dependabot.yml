@@ -1,35 +1,40 @@
 version: 2
+
+# 零锁定策略：不设置任何 ignore。
+#   所有依赖的所有 semver 范围都由 dependabot 自动开 PR；安全性由 CI 兜底
+#   —— CI 红 → 不会 approve / 不会合并，PR 保留待人工判断。
+#
+# 分组：minor + patch 合并成一个 PR（降噪）；major 单独成 PR（需人工过目）。
+#
+# 安全优先级高于版本新鲜度：dependabot 的 security updates 独立于本文件的
+# schedule（由仓库 Settings → Code security 的 Dependabot alerts/security updates
+# 开关控制），发现漏洞时会立刻开 PR，不受下面 daily/weekly 节奏限制。
+
 updates:
-  # === Rust / Cargo 依赖 ===
-  # 零锁定策略：所有依赖的所有 semver 范围都自动升级。
-  # 风险控制：auto-approve workflow 只在 CI 全绿时才 approve；
-  # CI 红 → auto-approve 失败 → PR 不会被自动合并 → 人类介入。
   - package-ecosystem: cargo
-    directory: /
+    directory: "/"
     schedule:
-      # daily — 安全漏洞第一时间响应
       interval: daily
       time: "04:00"
-    open-pull-requests-limit: 10
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    labels: ["dependencies", "rust"]
     groups:
-      # WebView 核心（wry / tao / webview2-com 版本必须同步，分开升会编译失败）
-      webview-core:
-        patterns:
-          - "wry"
-          - "tao"
-          - "webview2-com*"
-      # 解析器 / 格式库（html/url/base64/png 通常 patch 安全）
-      parsers:
-        patterns:
-          - "*html*"
-          - "*url*"
-          - "*base64*"
-          - "*png*"
+      # wry / tao / webview2-com 必须同批升级（版本互相约束），
+      # patterns: "*" 已覆盖；这里显式命名便于识别。
+      rust-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
-  # === GitHub Actions ===
-  # 同样零锁定；Actions 大版本变更如果破坏 CI，CI 会红 → 不自动合并。
   - package-ecosystem: github-actions
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    labels: ["dependencies", "github-actions"]
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

@@ -1,17 +1,32 @@
 name: CI
 
+# 设计（单一闭环，无跨 workflow 触发、无分支保护依赖）：
+#
+#   pull_request  → verify (windows) + verify (ubuntu) + banned-words
+#                   ↳ 三项全绿 + dependabot-auto-approve 的 approve/auto-merge
+#                     → 合入 main
+#   push: main    → 同样跑三项门禁
+#                   → prepare-release：三项全绿后自动算下一个 patch 版本、
+#                     同步 Cargo.lock、提交、打 tag
+#                   → build (windows) + build (linux)：checkout 该 tag 构建
+#                   → publish release：汇总产物 + SHA256 → GitHub Release
+#
+# 为什么版本号必须回写并打进 tag：build 作业有 "tag == workspace version" 三方
+# 等值门禁（tag / Cargo.toml / .deb control 同源）。因此 prepare-release 会把
+# bump 提交进 tag；main 分支的回写若被分支保护拒绝则降级为仅推 tag（发布不受影响）。
+
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
-# 同一 ref 的新推送取消旧运行；tag 发布运行不取消（保证发布完整性）
+# 同一 ref 的新推送取消旧运行；tag 与 main 发布运行不取消（保证发布完整性）
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# 最小权限：默认只读；release job 单独提升 contents: write
+# 最小权限：默认只读；prepare-release / release 单独提升 contents: write
 permissions:
   contents: read
 
@@ -173,23 +188,92 @@ jobs:
           if [ "$fail" -ne 0 ]; then exit 1; fi
           echo "banned-words scan: clean"
 
-  # 发布（仅 v* 标签）：Windows 单目标
+  # 发布准备：三项门禁全绿后，算下一个 patch 版本 → 同步 Cargo.lock → 提交 → 打 tag。
+  # 只在 push 到 main 时执行；release 自身产生的 "chore(release): ..." 提交不再触发。
+  prepare-release:
+    name: prepare release
+    needs: [verify, verify-linux, banned-words]
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && !startsWith(github.event.head_commit.message, 'chore(release):')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute next patch version
+        id: version
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1)
+          latest=${latest:-v0.0.0}
+          ver=${latest#v}
+          IFS=. read -r major minor patch <<< "$ver"
+          new="${major}.${minor}.$((patch + 1))"
+          echo "latest tag: ${latest} → next: v${new}"
+          echo "tag=v${new}" >> "$GITHUB_OUTPUT"
+          echo "new=${new}"  >> "$GITHUB_OUTPUT"
+
+      - name: Bump workspace version and sync Cargo.lock
+        run: |
+          set -euo pipefail
+          new="${{ steps.version.outputs.new }}"
+          # 根 Cargo.toml 中唯一以 "version = " 开头的行就是 [workspace.package].version
+          n=$(grep -c '^version = "' Cargo.toml)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly 1 'version = ' line in Cargo.toml, found $n"
+            exit 1
+          fi
+          sed -i "s/^version = \".*\"$/version = \"${new}\"/" Cargo.toml
+          # 关键：Cargo.lock 记录三个 workspace member 的版本，不同步则 --locked 必失败
+          cargo update -p tail-core -p child -p master
+          echo "--- Cargo.toml ---"; grep -m1 '^version = ' Cargo.toml
+          echo "--- Cargo.lock members ---"; grep -A1 -E '^name = "(tail-core|child|master)"$' Cargo.lock | grep version
+
+      - name: Commit, tag, and push
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): bump to ${TAG#v}"
+          # main 受分支保护：回写可能被拒。tag 始终可推，发布不依赖回写成功。
+          git push origin HEAD:main \
+            || echo "::warning::main 受分支保护，版本回写已跳过（tag 内版本仍一致）"
+          git tag -a "$TAG" -m "Release ${TAG#v}"
+          git push origin "refs/tags/$TAG"
+          echo "✅ tagged $TAG"
+
+  # 发布（produces Windows 单目标产物）
   build:
     name: build (windows)
-    needs: verify
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: prepare-release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       # 版本三方等值门禁：tag 名 == 根 Cargo.toml [workspace.package].version。
       # .deb control Version 由 CARGO_PKG_VERSION（同源于 workspace version）
       # 编译期写入 → 校验此处一处即闭环 tag / Cargo.toml / .deb 三方。
       - name: Version gate (tag == workspace version)
         shell: bash
+        env:
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           cargo_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
           echo "tag=${tag} cargo=${cargo_ver}"
           if [ -z "${cargo_ver}" ] || [ "${tag}" != "${cargo_ver}" ]; then
@@ -207,6 +291,8 @@ jobs:
       # ../target 定位 release/child.exe —— 先显式构建 child 保证模板就位。
       - name: Build child then workspace
         shell: bash
+        env:
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           set -euo pipefail
           cargo build -p child --release --locked --target x86_64-pc-windows-msvc
@@ -218,7 +304,7 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          cp "$bin" "dist/web2app-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc.exe"
+          cp "$bin" "dist/web2app-${TAG}-x86_64-pc-windows-msvc.exe"
           ls -l dist
 
       - name: Upload artifact
@@ -233,18 +319,21 @@ jobs:
   # 同样钉 ubuntu-22.04——发布产物的 glibc 基线（见 verify-linux 注释）。
   build-linux:
     name: build (linux)
-    needs: verify-linux
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: prepare-release
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       # 版本三方等值门禁：同 build (windows)——tag / Cargo.toml / .deb 一处校验闭环。
       - name: Version gate (tag == workspace version)
         shell: bash
+        env:
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           cargo_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
           echo "tag=${tag} cargo=${cargo_ver}"
           if [ -z "${cargo_ver}" ] || [ "${tag}" != "${cargo_ver}" ]; then
@@ -270,11 +359,13 @@ jobs:
       # 不打 .deb（装进 /usr/bin 后产物落盘目录不可写，且违背「下载即跑」承诺）。
       # 只有 child 产物才是平台原生安装形态（.exe 单文件 / .deb 包）。
       - name: Stage bare ELF
+        env:
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/release/web2app "dist/web2app-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
-          size=$(wc -c < "dist/web2app-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu")
+          cp target/release/web2app "dist/web2app-${TAG}-x86_64-unknown-linux-gnu"
+          size=$(wc -c < "dist/web2app-${TAG}-x86_64-unknown-linux-gnu")
           if [ "$size" -gt 2097152 ]; then
             echo "::error::bare ELF exceeds 2MB target ($size bytes)"
             exit 1
@@ -292,8 +383,7 @@ jobs:
   # 汇总产物 + SHA256SUMS → GitHub Release（发布物唯一来源）
   release:
     name: publish release
-    needs: [build, build-linux]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare-release, build, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -319,9 +409,9 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
           # 已存在则先删除（幂等重发）
           RELEASE_ID=$(curl -sf -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
