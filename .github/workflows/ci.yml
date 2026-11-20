@@ -247,9 +247,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
           git commit -m "chore(release): bump to ${TAG#v}"
-          # main 受分支保护：回写可能被拒。tag 始终可推，发布不依赖回写成功。
-          git push origin HEAD:main \
-            || echo "::warning::main 受分支保护，版本回写已跳过（tag 内版本仍一致）"
+          # 只推 tag，不 push main：main 受分支保护（需 PR），bot 无法直接写。
+          # 版本号以 tag 为准——bump commit 挂在 tag 上，tag 内 Cargo.toml/lock 版本一致。
+          # 下次发布从最新 tag 递增，与 main 上 Cargo.toml 的滞后无关。
           git tag -a "$TAG" -m "Release ${TAG#v}"
           git push origin "refs/tags/$TAG"
           echo "✅ tagged $TAG"
@@ -282,22 +282,24 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          target: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
 
-      # --target 下 child 落在 target/<triple>/release，master/build.rs 经
-      # ../target 定位 release/child.exe —— 先显式构建 child 保证模板就位。
+      # 与 build (linux) / verify 完全一致：不带 --target。
+      # 原因：cargo 的 build script 始终在 host target（target/release/build/）下编译运行，
+      # master/build.rs 经 OUT_DIR 反推 child 路径（target/release/child.exe）。
+      # 一旦加 --target，child 产物落在 target/<triple>/release/ 而 build script OUT_DIR
+      # 仍在 target/release/build/，反推出的 target/release/child.exe 不存在 → build.rs:61 panic。
+      # windows-latest 的 host triple 本就是 x86_64-pc-windows-msvc，无需显式 --target。
       - name: Build child then workspace
         shell: bash
         env:
           TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           set -euo pipefail
-          cargo build -p child --release --locked --target x86_64-pc-windows-msvc
-          cargo build --workspace --release --locked --target x86_64-pc-windows-msvc
-          bin="target/x86_64-pc-windows-msvc/release/web2app.exe"
+          cargo build -p child --release --locked
+          cargo build --workspace --release --locked
+          bin="target/release/web2app.exe"
           size=$(wc -c < "$bin")
           if [ "$size" -gt 2097152 ]; then
             echo "::error::${bin} exceeds 2MB target ($size bytes)"
