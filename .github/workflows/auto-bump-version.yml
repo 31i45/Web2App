@@ -54,30 +54,26 @@ jobs:
           echo "new=$NEW"       >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
 
-      # Step 2: 验证 PR scope 只涉及依赖文件（防手动 PR 误触发）
-      - name: Verify PR scope (dependency-only)
+      # Step 2: 验证确实是 dependabot 自动开的 PR（防手动 PR 误触发 bump）
+      # 策略：检查 PR title 是否以 "build(deps):" 或 "build(deps-dev):" 开头 —
+      # 这是 dependabot 固定格式，手动 PR 不会用。比文件白名单更可靠，
+      # 因为 dependabot 升级 Actions 时本来就会改 .github/workflows/*.yml，
+      # 而 CI 修复偶尔需要 cherry-pick build.rs 之类的文件到 PR 分支。
+      - name: Verify PR is dependabot dependency bump
         if: github.event_name != 'workflow_dispatch'
         run: |
-          PR_NUM=${{ github.event.pull_request.number }}
-          # 允许 Cargo.lock / Cargo.toml / dependabot.yml — 纯 Rust 项目无前端包文件
-          ALLOWED='Cargo.lock|Cargo.toml|dependabot.yml|dependabot.yaml'
-          # GitHub API 需 Authorization（private 仓库必须；public 仓库也带上无副作用）
-          CHANGED=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/files" \
-            | jq -r '.[].filename')
-          BAD=""
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            if ! echo "$f" | grep -qE "^($ALLOWED)$"; then
-              BAD="${BAD}${f}${BAD:+$'\n'}"
-            fi
-          done <<< "$CHANGED"
-          if [ -n "$BAD" ]; then
-            echo "::error::unexpected files changed in PR (manual review required):"
-            echo "$BAD"
-            exit 1
-          fi
-          echo "PR scope OK (only dependency files modified)"
+          TITLE="${{ github.event.pull_request.title }}"
+          echo "PR title: $TITLE"
+          case "$TITLE" in
+            "build(deps):"* | "build(deps-dev):"*)
+              echo "✓ Confirmed: dependabot dependency bump PR"
+              ;;
+            *)
+              echo "::error::PR title does not match dependabot format (build(deps): ...)"
+              echo "Manual or other-bot PRs will not trigger auto-bump."
+              exit 1
+              ;;
+          esac
 
       # Step 3: 原地修改 Cargo.toml version（精确匹配 → 安全）
       - name: Patch Cargo.toml version
