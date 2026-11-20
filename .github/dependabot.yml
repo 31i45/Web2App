@@ -1,15 +1,16 @@
 version: 2
 updates:
-  # === Cargo 依赖 ===
+  # === Rust / Cargo 依赖 ===
+  # 零锁定策略：所有依赖的所有 semver 范围都自动升级。
+  # 风险控制：auto-approve workflow 只在 CI 全绿时才 approve；
+  # CI 红 → auto-approve 失败 → PR 不会被自动合并 → 人类介入。
   - package-ecosystem: cargo
     directory: /
     schedule:
-      # daily 比 weekly 更及时响应安全漏洞（security > latest 优先级）
+      # daily — 安全漏洞第一时间响应
       interval: daily
       time: "04:00"
     open-pull-requests-limit: 10
-    # Patch 版本走 Task 3 的 auto-approve workflow 自动合并；
-    # Minor/Major 被 branch protection 挡掉，需手动审查。
     groups:
       # WebView 核心（wry / tao / webview2-com 版本必须同步，分开升会编译失败）
       webview-core:
@@ -24,24 +25,11 @@ updates:
           - "*url*"
           - "*base64*"
           - "*png*"
-    ignore:
-      # windows-sys 0.60+ 移除 BOOL 等类型，破坏 wry/tao 传递依赖（2026-10-18 本地实测）
-      # 永久 ignore minor/major — 等 wry/tao 上游迁到兼容版本再解除
-      - dependency-name: "windows-sys"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      # wry 0.57.2 具体版本有 Linux E2E 回归（#1915 合成事件坐标修复引入新问题）
-      # 只跳过这一个坏版本；0.57.1/0.57.3+ 正常接收自动升级
-      - dependency-name: "wry"
-        versions: ["0.57.2"]
 
   # === GitHub Actions ===
+  # 同样零锁定；Actions 大版本变更如果破坏 CI，CI 会红 → 不自动合并。
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    # Actions patch（checkout v4.1.x / cache v2.x）CI 稳定，由 Task 3 auto-approve 自动合；
-    # Major（v4→v7）行为变更风险大，需手动审查。
-    ignore:
-      - dependency-name: "actions/*"
-        update-types: ["version-update:semver-major"]
