@@ -29,13 +29,34 @@ fn main() {
   let legacy_release = PathBuf::from(format!("{workspace_target}/release/{child_bin}"));
   let legacy_debug = PathBuf::from(format!("{workspace_target}/debug/{child_bin}"));
 
+  // 防御性查找：不仅 exists()，还必须是普通文件（不是目录/管道/FIFO）。
+  // CI runner 偶尔会因为缓存竞态在 target/ 下生成同名目录或管道文件，
+  // std::fs::copy 遇到这种路径会报 "InvalidInput: source path is neither a
+  // regular file nor a symlink to a regular file" — 这里提前过滤掉。
   let child: PathBuf = via_out_dir
     .into_iter()
     .chain([legacy_release, legacy_debug])
-    .find(|p| p.exists())
+    .find(|p| match p.metadata() {
+      Ok(m) => m.is_file() || m.file_type().is_symlink(),
+      Err(_) => false,
+    })
     .unwrap_or_else(|| {
+      // 诊断：列出三个候选路径及其类型，帮助定位 CI 偶发竞态。
+      let candidates = [
+        PathBuf::from(&out_dir).ancestors().nth(3).map(|d| d.join(child_bin)),
+        Some(PathBuf::from(format!("{workspace_target}/release/{child_bin}"))),
+        Some(PathBuf::from(format!("{workspace_target}/debug/{child_bin}"))),
+      ];
+      let mut diag = String::new();
+      for c in candidates.into_iter().flatten() {
+        let kind = match c.metadata() {
+          Ok(m) => format!("{} ({})", m.len(), m.file_type().is_file().then_some("file").unwrap_or("other")),
+          Err(_) => "not found".to_string(),
+        };
+        diag.push_str(&format!("  {} → {}\n", c.display(), kind));
+      }
       panic!(
-        "{child_bin} not found — run build.ps1 first (builds child before master); OUT_DIR={out_dir}"
+        "{child_bin} not found as a regular file — run cargo build -p child first.\nOUT_DIR={out_dir}\nCandidates:\n{diag}"
       )
     });
 
