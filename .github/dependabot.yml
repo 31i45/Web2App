@@ -26,12 +26,13 @@ updates:
           - "*png*"
     ignore:
       # windows-sys 0.60+ 移除 BOOL 等类型，破坏 wry/tao 传递依赖（2026-10-18 本地实测）
+      # 永久 ignore minor/major — 等 wry/tao 上游迁到兼容版本再解除
       - dependency-name: "windows-sys"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      # wry 0.57.2 Linux E2E 回归（#1915 合成事件坐标修复引入新问题）；
-      # patch 升级暂时跳过 → 需手动改 Cargo.toml pin + 移除本条目后才能自动收 patch。
+      # wry 0.57.2 具体版本有 Linux E2E 回归（#1915 合成事件坐标修复引入新问题）
+      # 只跳过这一个坏版本；0.57.1/0.57.3+ 正常接收自动升级
       - dependency-name: "wry"
-        update-types: ["version-update:semver-patch"]
+        versions: ["0.57.2"]
 
   # === GitHub Actions ===
   - package-ecosystem: github-actions
