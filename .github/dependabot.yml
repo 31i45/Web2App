@@ -15,7 +15,7 @@ updates:
     directory: "/"
     schedule:
       interval: daily
-      time: "04:00"
+      time: "04:05"
       timezone: "Asia/Shanghai"
     open-pull-requests-limit: 5
     rebase-strategy: auto
