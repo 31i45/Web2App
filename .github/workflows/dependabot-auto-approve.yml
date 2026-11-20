@@ -32,14 +32,17 @@ jobs:
       - name: Approve and merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          gh pr review "$PR" --approve \
+          # 本 job 不 checkout，工作目录不是 git 仓库 → gh 必须显式 -R 指定仓库，
+          # 否则报 "fatal: not a git repository"。
+          gh pr review "$PR" -R "$REPO" --approve \
             --body "🤖 自动批准：CI 全绿（verify windows / verify ubuntu / banned-words）。依赖升级已通过完整门禁。"
           # 优先走 auto-merge（等 required checks 收尾后再合），
           # 仓库未启用 auto-merge 能力时退化为 admin 直接合并。
-          gh pr merge "$PR" --squash --auto \
-            || gh pr merge "$PR" --squash --admin
+          gh pr merge "$PR" -R "$REPO" --squash --auto \
+            || gh pr merge "$PR" -R "$REPO" --squash --admin
           echo "✅ merged PR #${PR}: ${TITLE}"
